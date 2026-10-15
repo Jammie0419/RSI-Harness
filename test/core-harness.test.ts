@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,8 +11,10 @@ import {
   createGeneratedTools,
   createHarnessGenome,
   createHarnessPatchSchema,
+  ensureProjectIgnored,
   loadHarnessGenomeFile,
   mergeHarnessGenomeOverrides,
+  PROJECT_CONFIG_DIRECTORY,
   renderHarnessSystemPrompt,
   validateHarnessGenome,
   validateHarnessPatch,
@@ -464,4 +467,91 @@ test("Genome MCP servers expose real stdio tools", async () => {
   } finally {
     await mcp.close();
   }
+});
+
+test("a project's RSIH directory is added to that project's ignore rules", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rsih-project-ignore-"));
+  const project = join(root, "project");
+  const nested = join(project, "src", "deep");
+  await mkdir(join(project, PROJECT_CONFIG_DIRECTORY), { recursive: true });
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(project, ".gitignore"), "node_modules/\n", "utf8");
+  const ignorePath = join(project, ".gitignore");
+  const read = () => readFile(ignorePath, "utf8");
+
+  // Outside a repository there is nothing to keep out of git, even with a
+  // `.gitignore` sitting in the directory.
+  assert.equal(ensureProjectIgnored(project), undefined);
+  assert.equal(await read(), "node_modules/\n");
+
+  await mkdir(join(project, ".git"), { recursive: true });
+  // A run in a subdirectory has to leave the entry at the work tree root, which
+  // is the `.gitignore` git reads for the whole repository.
+  assert.equal(ensureProjectIgnored(nested), ignorePath);
+  assert.equal(await read(), `node_modules/\n${PROJECT_CONFIG_DIRECTORY}/\n`);
+
+  // Idempotent: nothing left to say on the next run.
+  assert.equal(ensureProjectIgnored(project), undefined);
+  assert.equal(await read(), `node_modules/\n${PROJECT_CONFIG_DIRECTORY}/\n`);
+
+  // A repository whose project layer was never created is left alone: RSIH does
+  // not make a directory just to ignore it.
+  const untouched = join(root, "untouched");
+  await mkdir(join(untouched, ".git"), { recursive: true });
+  await writeFile(join(untouched, ".gitignore"), "dist/\n", "utf8");
+  assert.equal(ensureProjectIgnored(untouched), undefined);
+  assert.equal(await readFile(join(untouched, ".gitignore"), "utf8"), "dist/\n");
+});
+
+test("the project ignore respects what the repository already has", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rsih-project-ignore-"));
+  const read = (directory) => readFile(join(directory, ".gitignore"), "utf8");
+  const prepare = async (name, { git = "dir", gitignore } = {}) => {
+    const directory = join(root, name);
+    await mkdir(join(directory, PROJECT_CONFIG_DIRECTORY), { recursive: true });
+    if (git === "dir") {
+      await mkdir(join(directory, ".git"), { recursive: true });
+    } else if (git === "file") {
+      // A worktree or submodule marks its root with a file, not a directory.
+      await writeFile(join(directory, ".git"), "gitdir: ../elsewhere\n", "utf8");
+    }
+    if (gitignore !== undefined) {
+      await writeFile(join(directory, ".gitignore"), gitignore, "utf8");
+    }
+    return directory;
+  };
+
+  // A spelling git already treats as covering the directory is left untouched.
+  const covered = await prepare("covered", {
+    gitignore: `/${PROJECT_CONFIG_DIRECTORY}/\n`,
+  });
+  assert.equal(ensureProjectIgnored(covered), undefined);
+  assert.equal(await read(covered), `/${PROJECT_CONFIG_DIRECTORY}/\n`);
+
+  // No `.gitignore`: RSIH does not create one. Dropping a new file into
+  // someone's project is the pollution this is meant to prevent.
+  const bare = await prepare("bare");
+  assert.equal(ensureProjectIgnored(bare), undefined);
+  assert.equal(existsSync(join(bare, ".gitignore")), false);
+
+  // `.git` as a file is still a repository.
+  const worktree = await prepare("worktree", { git: "file", gitignore: "dist/\n" });
+  assert.equal(ensureProjectIgnored(worktree), join(worktree, ".gitignore"));
+  assert.equal(await read(worktree), `dist/\n${PROJECT_CONFIG_DIRECTORY}/\n`);
+
+  // The edited file keeps its own line endings.
+  const windows = await prepare("windows", { gitignore: "node_modules/\r\n" });
+  assert.equal(ensureProjectIgnored(windows), join(windows, ".gitignore"));
+  assert.equal(
+    await read(windows),
+    `node_modules/\r\n${PROJECT_CONFIG_DIRECTORY}/\r\n`,
+  );
+
+  // A file without a trailing newline gains a line, not a joined one.
+  const unterminated = await prepare("unterminated", { gitignore: "dist/" });
+  assert.equal(ensureProjectIgnored(unterminated), join(unterminated, ".gitignore"));
+  assert.equal(
+    await read(unterminated),
+    `dist/\n${PROJECT_CONFIG_DIRECTORY}/\n`,
+  );
 });

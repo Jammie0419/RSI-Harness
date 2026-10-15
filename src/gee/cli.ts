@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 // Importing the rsih entry sets PI_PACKAGE_DIR, RSIH_CODING_AGENT_DIR and the
 // version-check opt-out in one place. `gee` must not duplicate that setup.
 import { runCli } from "../cli.ts";
 import { expandGenomeShorthand } from "../cli/genome-shorthand.ts";
+import { isEntryPoint } from "../cli/entry-point.ts";
 
 const GENOME = "harness-rsi";
 
@@ -39,11 +38,7 @@ export async function runGeeCli(argv = process.argv.slice(2)) {
   return runCli(geeArgs(argv));
 }
 
-const isMain =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
-
-if (isMain) {
+if (isEntryPoint(import.meta.url)) {
   runGeeCli().catch((error) => {
     console.error(`gee: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

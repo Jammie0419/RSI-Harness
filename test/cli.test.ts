@@ -6,11 +6,12 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -23,6 +24,7 @@ import {
   genomeActiveToolNames,
   genomeFooterStatus,
   parseCliArgs,
+  RSIH_VERSION,
 } from "../src/pi-cli-runtime.ts";
 import {
   genomeResourceIsolationArgs,
@@ -32,6 +34,7 @@ import {
   expandGenomeShorthand,
   genomeShorthandReference,
 } from "../src/cli/genome-shorthand.ts";
+import { isEntryPoint } from "../src/cli/entry-point.ts";
 
 const codeDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -692,4 +695,114 @@ test("installing carries the whole payload, not just the executable", () => {
   assert.match(installScript, /npm run --silent install:binary/);
   // And it has to prove the payload arrived rather than trust the copy.
   assert.match(installScript, /rsih" genome validate paperlab/);
+});
+
+test("a linked entry point is recognised, not silently ignored", () => {
+  // `npm link` and `npm install -g .` reach the entry point through a symlink.
+  // Node reports the module URL as the real path while argv[1] keeps the linked
+  // one, so comparing the raw strings leaves the installed command doing
+  // nothing at all and exiting 0.
+  const root = mkdtempSync(join(tmpdir(), "rsih-entry-"));
+  const repository = join(root, "repo");
+  mkdirSync(repository);
+  const entry = join(repository, "cli.js");
+  writeFileSync(entry, "", "utf8");
+  const linked = join(root, "linked");
+  // A junction needs no elevation on Windows; elsewhere the type is ignored.
+  symlinkSync(repository, linked, "junction");
+
+  const moduleUrl = pathToFileURL(realpathSync(entry)).href;
+  assert.equal(
+    isEntryPoint(moduleUrl, [process.execPath, join(linked, "cli.js")]),
+    true,
+  );
+  assert.equal(isEntryPoint(moduleUrl, [process.execPath, entry]), true);
+  assert.equal(
+    isEntryPoint(moduleUrl, [process.execPath, join(repository, "other.js")]),
+    false,
+  );
+  assert.equal(isEntryPoint(moduleUrl, [process.execPath, "-p", "hi"]), false);
+});
+
+test("install.sh installs a form every shell can start", () => {
+  const installScript = readFileSync(join(codeDirectory, "install.sh"), "utf8");
+  // Windows gets node wrappers rather than a symlinked Bun binary: cmd.exe and
+  // PowerShell pick a command by extension, so each wrapper needs a `.cmd` twin.
+  assert.match(installScript, /ON_WINDOWS=yes/);
+  assert.match(installScript, /\$BIN_DIR\/rsih\.cmd/);
+  assert.match(installScript, /\$BIN_DIR\/gee\.cmd/);
+  // The Windows `gee` resolves its sibling rather than spelling the install
+  // path out, which cmd.exe would misread in a non-ASCII directory.
+  assert.match(installScript, /"%~dp0rsih\.cmd"/);
+});
+
+test("a run that creates the project's own directory ignores it before exiting", () => {
+  // The startup check cannot see a directory the run itself is about to create,
+  // and waiting for the next run would leave one commit window open. Sessions
+  // written next to the project are the case that does this on its own.
+  const directory = mkdtempSync(join(tmpdir(), "rsih-exit-ignore-"));
+  const project = join(directory, "project");
+  mkdirSync(project);
+  // The check reads no git: a `.git` entry and an ignore file are all it looks
+  // for, which keeps this test independent of a git binary.
+  mkdirSync(join(project, ".git"));
+  writeFileSync(join(project, ".gitignore"), "node_modules/\n", "utf8");
+
+  const providersPath = join(directory, "providers.json");
+  const genomePath = join(directory, "genome.json");
+  writeFileSync(
+    providersPath,
+    JSON.stringify({
+      mock: { kind: "mock", model: "mock-cli", mock_responses: ["ok"] },
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    genomePath,
+    JSON.stringify(
+      createHarnessGenome({
+        genome_id: "harness:exit-ignore",
+        model: { profile: "mock", id: "mock-cli" },
+      }),
+    ),
+    "utf8",
+  );
+
+  const result = runCli(directory, [
+    "-p",
+    "Say ok.",
+    "--run-id",
+    "exit-ignore",
+    "--config",
+    providersPath,
+    "--genome",
+    genomePath,
+    "--cwd",
+    project,
+    "--session-dir",
+    join(".rsih", "sessions"),
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    readFileSync(join(project, ".gitignore"), "utf8"),
+    "node_modules/\n.rsih/\n",
+  );
+  assert.match(result.stderr, /added \.rsih\/ to/);
+});
+
+test("--version answers for RSIH, not for the Pi it embeds", () => {
+  // `dist/package.json` carries Pi's version so the model catalog endpoint
+  // recognises the distribution; the flag has to answer for RSIH instead, and
+  // without compiling settings or resolving a Genome on the way.
+  const directory = mkdtempSync(join(tmpdir(), "rsih-version-"));
+  for (const flag of ["--version", "-v"]) {
+    const result = runCli(directory, [flag]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), RSIH_VERSION);
+  }
+
+  // After `--` the same word is a message, not a flag.
+  const message = runCli(directory, ["-p", "--", "--version"]);
+  assert.notEqual(message.stdout.trim(), RSIH_VERSION);
 });

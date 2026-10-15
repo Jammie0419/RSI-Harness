@@ -51,6 +51,10 @@ import {
 import { validateJsonSchema } from "./core/schema.ts";
 import { createMcpTools } from "./harness/mcp.ts";
 import {
+  ensureProjectIgnored,
+  PROJECT_CONFIG_DIRECTORY,
+} from "./harness/project-ignore.ts";
+import {
   applyModelOptionsToPayload,
   genomeResourceIsolationArgs,
   projectGenomeResources,
@@ -186,6 +190,23 @@ export function parseCliArgs(argv) {
   }
 
   return result;
+}
+
+/**
+ * Arguments whose run only prints and exits. Nothing in the project is being
+ * worked in, so nothing about it should change -- including the `.gitignore`
+ * line a real run would add.
+ */
+const PRINT_ONLY_ARGUMENTS = new Set([
+  "--help",
+  "-h",
+  "--version",
+  "-v",
+  "--list-models",
+]);
+
+function printsOnly(args) {
+  return args.some((argument) => PRINT_ONLY_ARGUMENTS.has(argument));
 }
 
 function optionValue(args, name) {
@@ -1045,6 +1066,7 @@ async function createGenomeExtension({
   maxTurns: cliMaxTurns,
   cliOverridesTools,
   cliOverridesThinking,
+  projectIgnore,
   cwd,
 }): Promise<ExtensionFactory> {
   return async (pi) => {
@@ -1162,6 +1184,15 @@ async function createGenomeExtension({
 
       if (active.seedNotice && ctx.mode === "tui") {
         ctx.ui.notify(active.seedNotice.message, active.seedNotice.level);
+      }
+
+      // Reported rather than done silently: the file belongs to the project,
+      // so whoever reviews the diff should hear where it came from.
+      if (projectIgnore && ctx.mode === "tui") {
+        ctx.ui.notify(
+          `Added ${PROJECT_CONFIG_DIRECTORY}/ to ${projectIgnore}, so this project's RSIH directory stays out of git`,
+          "info",
+        );
       }
 
       // Reported here rather than in the command handler because `ctx.reload()`
@@ -1286,7 +1317,29 @@ function piSessionDirectory(cwd, piArgs) {
   return join(agentDirectory, "sessions", encoded);
 }
 
+/**
+ * Whether argv asks for the version, read the way Pi reads it: anywhere before a
+ * `--`, which ends option parsing.
+ */
+function versionRequested(args) {
+  for (const argument of args) {
+    if (argument === "--") return false;
+    if (argument === "--version" || argument === "-v") return true;
+  }
+  return false;
+}
+
 export async function runPiCli(argv) {
+  // `rsih --version` answers for RSIH, not for the Pi it embeds. The copied
+  // `dist/package.json` carries the Pi version so the model catalog endpoint
+  // recognises the distribution (see `scripts/copy-build-assets.ts`), and this
+  // is the one place that would otherwise leak into the wrong answer. Answered
+  // first, so the flag never compiles settings or resolves a Genome on its way
+  // to printing a version.
+  if (versionRequested(argv)) {
+    console.log(RSIH_VERSION);
+    return;
+  }
   // `rsih genome ...` is RSIH's own subcommand; everything else, including Pi's
   // install/update/list/config/auth subcommands, falls through to Pi.
   if (runGenomeCommand(argv)) return;
@@ -1304,6 +1357,12 @@ export async function runPiCli(argv) {
   // macOS `/tmp` and `/var` resolve through symlinks and the session directory
   // Pi derives would not match.
   const cwd = process.cwd();
+  // A project's own `.rsih` belongs to whoever put it there, so the one thing
+  // RSIH does about it is keep it out of the repository's commits. Skipped for
+  // runs that only print and exit: those are not working in the project.
+  const projectIgnore = printsOnly(parsed.piArgs)
+    ? undefined
+    : ensureProjectIgnored(cwd);
   if (parsed.env) {
     loadEnvFile(resolve(cwd, parsed.env));
   } else {
@@ -1437,6 +1496,7 @@ export async function runPiCli(argv) {
     session,
     profiles: customProfiles,
     maxTurns: parsed.maxTurns,
+    projectIgnore,
     cliOverridesTools: hasOption(
       parsed.piArgs,
       "--tools",
@@ -1454,4 +1514,17 @@ export async function runPiCli(argv) {
   await runPiMain([...genomeArgs, ...parsed.piArgs], {
     extensionFactories: [extensionFactory],
   });
+
+  // A run can create the project's own `.rsih` on its way through -- a
+  // project-scoped session directory, or a project-scoped install. The startup
+  // check cannot see it yet, and waiting for the next run would leave it
+  // unignored in between, so the same check runs again before the process hands
+  // the terminal back.
+  if (!printsOnly(parsed.piArgs)) {
+    const added = ensureProjectIgnored(cwd);
+    if (added) {
+      // The TUI is gone by now, so this cannot be a notification.
+      console.error(`rsih: added ${PROJECT_CONFIG_DIRECTORY}/ to ${added}`);
+    }
+  }
 }

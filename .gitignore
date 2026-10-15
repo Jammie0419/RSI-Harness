@@ -6,3 +6,4 @@ dist/
 node_modules/
 references/papers/
 references/repos/
+.rsih/

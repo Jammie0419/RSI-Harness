@@ -55,4 +55,8 @@ export {
   seedStatus,
   userGenomeDirectory,
 } from "./harness/genome-loader.ts";
-export { createGeneratedTools } from "./harness/builtin-tools.ts";
+export { createGeneratedTools, generatedToolShell } from "./harness/builtin-tools.ts";
+export {
+  ensureProjectIgnored,
+  PROJECT_CONFIG_DIRECTORY,
+} from "./harness/project-ignore.ts";

@@ -4,6 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { CustomEditor as PiCustomEditor } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
+import { sep } from "node:path";
 import type {
   Component,
   EditorTheme,
@@ -143,13 +144,23 @@ function padToWidth(content: string, width: number): string {
   return `${content}${" ".repeat(Math.max(0, width - visibleWidth(content)))}`;
 }
 
+/**
+ * The header renders separators as `/` whichever platform it runs on, so a
+ * Windows path has to be converted before the home prefix can be recognised and
+ * the segments split. Without this the workspace reads `/.../` on Windows.
+ */
+function displaySeparators(path: string): string {
+  return sep === "\\" ? path.replace(/\\/g, "/") : path;
+}
+
 function compactWorkspacePath(path: string, width: number): string {
-  const home = homedir();
-  const displayPath = path === home
+  const home = displaySeparators(homedir());
+  const cwd = displaySeparators(path);
+  const displayPath = cwd === home
     ? "~"
-    : path.startsWith(`${home}/`)
-      ? `~${path.slice(home.length)}`
-      : path;
+    : cwd.startsWith(`${home}/`)
+      ? `~${cwd.slice(home.length)}`
+      : cwd;
   if (visibleWidth(displayPath) <= width) return displayPath;
 
   const segments = displayPath.split("/").filter(Boolean);

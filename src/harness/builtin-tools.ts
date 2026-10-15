@@ -4,6 +4,20 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /**
+ * The shell a generated tool starts in.
+ *
+ * A Genome declares POSIX sh -- `/bin/sh`, or the shorter `sh` -- which every
+ * POSIX system has. Windows has no `/bin/sh`, so both spellings resolve through
+ * PATH there, where Git Bash supplies one: a Genome written on Linux runs
+ * unchanged, and a host without any sh fails at spawn rather than running the
+ * script under the wrong interpreter (validation admits nothing but these two
+ * spellings).
+ */
+export function generatedToolShell(entrypoint = "/bin/sh") {
+  return process.platform === "win32" ? "sh" : entrypoint;
+}
+
+/**
  * Genome `generated_tools` run as sandboxed POSIX sh scripts. Pi owns every
  * built-in tool (read, ls, grep, find, write, edit, bash, powershell); RSIH
  * never reimplements them.
@@ -15,7 +29,7 @@ export function createGeneratedTools({ cwd, genome }) {
     parameters: tool.parameters,
     async execute(args, { signal } = {}) {
       const result = await execFileAsync(
-        tool.container_script.entrypoint ?? "/bin/sh",
+        generatedToolShell(tool.container_script.entrypoint),
         ["-c", tool.container_script.script],
         {
           cwd,
