@@ -35,12 +35,18 @@ function assertToolName(name, label) {
 export async function createMcpTools({ cwd, genome }) {
   const tools = [];
   const clients = [];
+  const errors = [];
 
-  try {
-    for (const server of genome.mcp?.servers ?? []) {
-      if (server.enabled === false) continue;
+  for (const server of genome.mcp?.servers ?? []) {
+    if (server.enabled === false) continue;
+    // One server that will not start -- a command this machine does not have,
+    // say -- must not take the whole inline extension down with it: the tools
+    // that did connect stay, and the failure is reported by the caller.
+    const serverTools = [];
+    let client;
+    try {
       if (!server.command) {
-        throw new Error(`Enabled MCP server "${server.name}" requires command.`);
+        throw new Error("requires a command");
       }
       const transport = new StdioClientTransport({
         command: server.command,
@@ -49,10 +55,7 @@ export async function createMcpTools({ cwd, genome }) {
         cwd: resolveInside(cwd, server.cwd),
         stderr: "inherit",
       });
-      const client = new Client(
-        { name: "rsih", version: "0.1.0" },
-        { capabilities: {} },
-      );
+      client = new Client({ name: "rsih", version: "0.1.0" }, { capabilities: {} });
       await client.connect(transport);
       clients.push(client);
       const listed = await client.listTools();
@@ -67,7 +70,7 @@ export async function createMcpTools({ cwd, genome }) {
         const name =
           config?.expose_as ?? `${server.name}_${discovered.name}`;
         assertToolName(name, `MCP tool "${server.name}.${discovered.name}"`);
-        tools.push({
+        serverTools.push({
           name,
           source: "mcp",
           description: config?.description ?? discovered.description ?? "",
@@ -88,14 +91,22 @@ export async function createMcpTools({ cwd, genome }) {
           },
         });
       }
+    } catch (error) {
+      if (client && clients.includes(client)) {
+        await Promise.allSettled([client.close()]);
+        clients.splice(clients.indexOf(client), 1);
+      }
+      errors.push(
+        `${server.name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
     }
-  } catch (error) {
-    await Promise.allSettled(clients.map((client) => client.close()));
-    throw error;
+    tools.push(...serverTools);
   }
 
   return {
     tools,
+    errors,
     close: () => Promise.allSettled(clients.map((client) => client.close())),
   };
 }

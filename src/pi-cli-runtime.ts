@@ -96,6 +96,20 @@ const CUSTOM_OPTIONS = new Set([
   "--run-id",
 ]);
 
+/**
+ * Pi's own subcommands. They dispatch on the first argument, so a run that asks
+ * for one has to reach Pi without a Genome's argv in front of it.
+ */
+const PI_SUBCOMMANDS = new Set([
+  "auth",
+  "install",
+  "remove",
+  "uninstall",
+  "update",
+  "list",
+  "config",
+]);
+
 const RSIH_FLAG_DESCRIPTIONS = Object.freeze([
   ["profile", "Provider profile from --config (also sets Pi's --provider)."],
   ["config", "Provider profile JSON with custom model endpoints."],
@@ -1140,6 +1154,10 @@ async function createGenomeExtension({
     }
 
     const mcp = await createMcpTools({ cwd, genome });
+    // Servers that did not start are reported, not fatal: their tools are simply
+    // missing, and the rest of the Genome -- instructions, tool patches,
+    // policies -- still applies to this session.
+    const mcpErrors = mcp.errors ?? [];
     for (const tool of mcp.tools) {
       pi.registerTool({
         name: tool.name,
@@ -1212,6 +1230,14 @@ async function createGenomeExtension({
           `Added ${PROJECT_CONFIG_DIRECTORY}/ to ${projectIgnore}, so this project's RSIH directory stays out of git`,
           "info",
         );
+      }
+
+      // A Genome can declare servers this machine cannot start. Saying so is the
+      // difference between "half the Genome is missing" and a mystery.
+      if (mcpErrors.length > 0) {
+        const message = `MCP servers that did not start: ${mcpErrors.join("; ")}`;
+        if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
+        else console.error(`rsih: ${message}`);
       }
 
       // Reported here rather than in the command handler because `ctx.reload()`
@@ -1530,7 +1556,11 @@ export async function runPiCli(argv) {
     cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
     cwd,
   });
-  await runPiMain([...genomeArgs, ...parsed.piArgs], {
+  // Pi's own subcommands dispatch on the first argument, and a Genome's argv is
+  // prepended to it. Without this, `rsih :paperlab auth check` answers the words
+  // "auth check" as a chat message instead of printing credentials.
+  const piSubcommand = PI_SUBCOMMANDS.has(parsed.piArgs[0]);
+  await runPiMain([...(piSubcommand ? [] : genomeArgs), ...parsed.piArgs], {
     extensionFactories: [extensionFactory],
   });
 

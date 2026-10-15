@@ -286,6 +286,49 @@ test("the header never renders a line wider than the terminal", () => {
   }
 });
 
+test("a Genome does not swallow Pi's subcommands", () => {
+  // A Genome's argv is prepended and Pi dispatches its subcommands on the first
+  // argument, so `rsih :paperlab auth check` used to answer the words "auth
+  // check" as a chat message instead of printing the credential status.
+  const directory = mkdtempSync(join(tmpdir(), "rsih-subcommand-"));
+  const providersPath = join(directory, "providers.json");
+  const genomePath = join(directory, "genome.json");
+  writeFileSync(
+    providersPath,
+    JSON.stringify({
+      mock: { kind: "mock", model: "mock-cli", mock_responses: ["ran a chat turn"] },
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    genomePath,
+    JSON.stringify(
+      createHarnessGenome({
+        genome_id: "harness:subcommand",
+        append_system_prompt: "Extra operating mode.",
+      }),
+    ),
+    "utf8",
+  );
+
+  const result = runCli(directory, [
+    "auth",
+    "check",
+    "--provider",
+    "mock",
+    "--config",
+    providersPath,
+    "--genome",
+    genomePath,
+  ]);
+
+  // `auth check` exits non-zero for a provider that is not ready, so the text is
+  // the assertion: it has to be Pi's answer, not a chat turn about the words.
+  const output = result.stdout + result.stderr;
+  assert.doesNotMatch(output, /ran a chat turn/);
+  assert.match(output, /not_ready/);
+});
+
 test("RSIH editor preserves Pi cursor marker when padding is zero", () => {
   const tui = { terminal: { rows: 42 }, requestRender() {} };
   const theme = {

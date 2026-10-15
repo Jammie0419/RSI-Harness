@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalJson, contentHash } from "./json.ts";
 
@@ -23,6 +23,22 @@ export function createArtifact(type, payload, options = {}) {
   };
 }
 
+/**
+ * The id is `${type}:${digest}` and `type` comes from the caller, so it has to
+ * become a name that cannot leave the store: path separators and traversal are
+ * replaced rather than escaped, and `get` derives the name the same way `put`
+ * does so the two can never disagree.
+ */
+function fileNameFor(artifactId) {
+  return `${String(artifactId)
+    .replaceAll(":", "__")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")}.json`;
+}
+
+function filePathIn(rootDirectory, artifactId) {
+  return join(rootDirectory, fileNameFor(artifactId));
+}
+
 export class FileArtifactStore {
   constructor(rootDirectory) {
     this.rootDirectory = rootDirectory;
@@ -30,19 +46,18 @@ export class FileArtifactStore {
 
   async put(artifact) {
     await mkdir(this.rootDirectory, { recursive: true });
-    const filename = `${artifact.artifact_id.replaceAll(":", "__")}.json`;
-    await writeFile(
-      join(this.rootDirectory, filename),
-      `${canonicalJson(artifact)}\n`,
-      "utf8",
-    );
+    const target = filePathIn(this.rootDirectory, artifact.artifact_id);
+    // Written beside the target and renamed into place: a concurrent reader sees
+    // either the previous file or the finished one, never a half-written one.
+    const temporary = `${target}.tmp-${process.pid}`;
+    await writeFile(temporary, `${canonicalJson(artifact)}\n`, "utf8");
+    await rename(temporary, target);
     return artifact;
   }
 
   async get(artifactId) {
-    const filename = `${artifactId.replaceAll(":", "__")}.json`;
     return JSON.parse(
-      await readFile(join(this.rootDirectory, filename), "utf8"),
+      await readFile(filePathIn(this.rootDirectory, artifactId), "utf8"),
     );
   }
 }

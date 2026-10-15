@@ -1,23 +1,27 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   applyHarnessPatch,
+  canonicalJson,
   componentOperations,
+  createArtifact,
   createDefaultHarnessGenome,
   createGeneratedTools,
   createHarnessGenome,
   createHarnessPatchSchema,
   ensureProjectIgnored,
+  FileArtifactStore,
   loadHarnessGenomeFile,
   mergeHarnessGenomeOverrides,
   PROJECT_CONFIG_DIRECTORY,
   renderHarnessSystemPrompt,
   validateHarnessGenome,
   validateHarnessPatch,
+  validateJsonSchema,
 } from "../src/index.ts";
 import { createMcpTools } from "../src/harness/mcp.ts";
 
@@ -469,6 +473,102 @@ test("Genome MCP servers expose real stdio tools", async () => {
   }
 });
 
+test("an MCP server that fails is isolated and reported, not fatal", async () => {
+  // A Genome can name servers this machine cannot start, and one dead server
+  // must not take the rest of the tools down with it: the healthy tools stay,
+  // and the failures come back as `errors` data for the session to show.
+  const directory = await mkdtemp(join(tmpdir(), "rsih-mcp-isolation-"));
+  const goodPath = join(directory, "echo-server.ts");
+  const boomPath = join(directory, "boom-server.ts");
+  const url = (path) => new URL(path, import.meta.url).href;
+  const serverSource = (handlers) => [
+    `import { Server } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js"))};`,
+    `import { StdioServerTransport } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js"))};`,
+    `import { CallToolRequestSchema, ListToolsRequestSchema } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/types.js"))};`,
+    `const server = new Server({ name: "probe", version: "1.0.0" }, { capabilities: { tools: {} } });`,
+    ...handlers,
+    `await server.connect(new StdioServerTransport());`,
+  ].join("\n");
+  await writeFile(
+    goodPath,
+    serverSource([
+      `server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", description: "Echo.", inputSchema: { type: "object", properties: {} } }] }));`,
+      `server.setRequestHandler(CallToolRequestSchema, async (request) => ({ content: [{ type: "text", text: JSON.stringify(request.params.arguments) }] }));`,
+    ]),
+    "utf8",
+  );
+  // Connects successfully, then fails the first request: the failing server's
+  // client has to be closed again on the way out.
+  await writeFile(
+    boomPath,
+    serverSource([
+      `server.setRequestHandler(ListToolsRequestSchema, async () => { throw new Error("probe: listTools exploded"); });`,
+      `server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));`,
+    ]),
+    "utf8",
+  );
+
+  const mcp = await createMcpTools({
+    cwd: directory,
+    genome: createHarnessGenome({
+      genome_id: "harness:mcp-isolation",
+      mcp: {
+        servers: [
+          {
+            name: "good",
+            command: process.execPath,
+            args: ["--experimental-strip-types", goodPath],
+          },
+          { name: "missing", command: "definitely-not-a-command", args: [] },
+          {
+            name: "boom",
+            command: process.execPath,
+            args: ["--experimental-strip-types", boomPath],
+          },
+        ],
+      },
+    }),
+  });
+
+  try {
+    assert.deepEqual(
+      mcp.tools.map((tool) => tool.name),
+      ["good_echo"],
+    );
+    assert.equal(mcp.errors.length, 2);
+    assert.match(mcp.errors[0], /^missing: /);
+    assert.match(mcp.errors[1], /^boom: /);
+    assert.equal(await mcp.tools[0].execute({ value: "hello" }), '{"value":"hello"}');
+  } finally {
+    await mcp.close();
+  }
+
+  // With nothing healthy left the call still resolves: the failure is data,
+  // not an exception thrown through Pi's extension startup.
+  const broken = await createMcpTools({
+    cwd: directory,
+    genome: createHarnessGenome({
+      genome_id: "harness:mcp-isolation-empty",
+      mcp: {
+        servers: [
+          { name: "missing", command: "definitely-not-a-command", args: [] },
+          {
+            name: "boom",
+            command: process.execPath,
+            args: ["--experimental-strip-types", boomPath],
+          },
+        ],
+      },
+    }),
+  });
+  try {
+    assert.equal(broken.tools.length, 0);
+    assert.equal(broken.errors.length, 2);
+  } finally {
+    await broken.close();
+  }
+});
+
 test("a project's RSIH directory is added to that project's ignore rules", async () => {
   const root = await mkdtemp(join(tmpdir(), "rsih-project-ignore-"));
   const project = join(root, "project");
@@ -606,5 +706,182 @@ test("the thinking ladder accepts Pi's highest level", () => {
         runtime: { thinking_level: "ultra" },
       }),
     /thinking_level is invalid/,
+  );
+});
+
+test("canonical hashing accepts JSON only", () => {
+  // A Date used to canonicalize to `{}`, NaN to `null` and `undefined` in an
+  // array to `null`, so two different payloads hashed alike and overwrote each
+  // other in the artifact store.
+  assert.throws(() => canonicalJson({ at: new Date(0) }), /JSON values only/);
+  assert.throws(() => canonicalJson({ value: NaN }), /JSON values only/);
+  assert.throws(() => canonicalJson([undefined]), /JSON values only/);
+  assert.equal(
+    canonicalJson({ b: 1, a: [{ y: 2, x: 1 }] }),
+    '{"a":[{"x":1,"y":2}],"b":1}',
+  );
+});
+
+test("an artifact stays inside its store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rsih-artifact-"));
+  // The type reaches the file name, so it must not be able to leave the root.
+  const artifact = createArtifact("../escaped", { ok: true });
+  const store = new FileArtifactStore(join(root, "store"));
+  await store.put(artifact);
+
+  assert.deepEqual(await readdirSync(join(root, "store")), [
+    `${artifact.artifact_id
+      .replaceAll(":", "__")
+      .replace(/[^A-Za-z0-9._-]+/g, "_")}.json`,
+  ]);
+  assert.deepEqual(readdirSync(root), ["store"]);
+  assert.deepEqual((await store.get(artifact.artifact_id)).payload, { ok: true });
+});
+
+test("the components that own nested objects must be objects", () => {
+  // A string or an array here used to pass validation and then either throw a
+  // bare TypeError from inside a patch, or lose the written values on the next
+  // serialization.
+  for (const bad of ["oops", [], 5]) {
+    assert.throws(
+      () => createHarnessGenome({ genome_id: "harness:containers", policies: bad }),
+      /policies must be an object/,
+    );
+  }
+  assert.throws(
+    () => createHarnessGenome({ genome_id: "harness:containers", runtime: [] }),
+    /runtime must be an object/,
+  );
+});
+
+test("a file-backed skill is addressed by the name Pi gives it", () => {
+  // `./skills/genome-authoring` is the skill `genome-authoring`. Matching on the
+  // `name` field alone made `remove_skill` a silent no-op and let `upsert_skill`
+  // append a second copy under a name the first one already had.
+  const genome = createHarnessGenome({
+    genome_id: "harness:file-backed",
+    skills: [{ source: "./skills/genome-authoring" }],
+    prompt_templates: ["./prompts/review.md"],
+  });
+
+  const removed = applyHarnessPatch(genome, {
+    hypothesis: "h",
+    expected_effect: "e",
+    risks: [],
+    operations: [{ op: "remove_skill", name: "genome-authoring" }],
+  });
+  assert.deepEqual(removed.skills, []);
+
+  const upserted = applyHarnessPatch(genome, {
+    hypothesis: "h",
+    expected_effect: "e",
+    risks: [],
+    operations: [
+      {
+        op: "upsert_skill",
+        name: "genome-authoring",
+        value: { description: "d", content: "c" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    upserted.skills.map((skill) => skill.name),
+    ["genome-authoring"],
+  );
+
+  assert.throws(
+    () =>
+      createHarnessGenome({
+        genome_id: "harness:file-backed",
+        skills: [
+          { source: "./skills/genome-authoring" },
+          { name: "genome-authoring", description: "d", content: "c" },
+        ],
+      }),
+    /Duplicate Harness Skill/,
+  );
+});
+
+test("a flat Genome reads a top-level null as inherit", async () => {
+  // A bundle documents `null` as "hand this back to the base"; the single-file
+  // form used to reject it in some fields and keep the null in others.
+  const directory = await mkdtemp(join(tmpdir(), "rsih-flat-genome-"));
+  const path = join(directory, "flat.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      genome_schema_version: "2",
+      genome_id: "harness:flat",
+      parent_id: null,
+      version: 1,
+      system_prompt: null,
+      settings: null,
+      runtime: { thinking_level: "max" },
+    }),
+    "utf8",
+  );
+
+  const loaded = loadHarnessGenomeFile(path).genome;
+  assert.equal("system_prompt" in loaded, false);
+  assert.equal("settings" in loaded, false);
+  assert.equal(loaded.runtime.thinking_level, "max");
+});
+
+test("the tool schema gate honours the standard keywords", () => {
+  // This gate rejects a tool call that leaves its Genome contract, so every
+  // keyword it ignores is narrowing a Genome believes it wrote.
+  assert.deepEqual(validateJsonSchema(null, { type: ["string", "null"] }), []);
+  assert.equal(validateJsonSchema(1, { type: ["string", "null"] }).length, 1);
+  assert.equal(
+    validateJsonSchema("zzz", { oneOf: [{ const: "a" }, { const: "b" }] }).length,
+    1,
+  );
+  assert.equal(
+    validateJsonSchema("a", { oneOf: [{ const: "a" }, { const: "b" }] }).length,
+    0,
+  );
+  assert.equal(
+    validateJsonSchema(false, { anyOf: [{ type: "string" }, { type: "number" }] })
+      .length,
+    1,
+  );
+  assert.equal(
+    validateJsonSchema(5, { allOf: [{ type: "number" }, { minimum: 10 }] }).length,
+    1,
+  );
+  assert.equal(validateJsonSchema("write", { const: "read" }).length, 1);
+  assert.equal(
+    validateJsonSchema(0, { type: "number", exclusiveMinimum: 1 }).length,
+    1,
+  );
+  assert.equal(
+    validateJsonSchema(10, { type: "number", exclusiveMaximum: 10 }).length,
+    1,
+  );
+  assert.equal(validateJsonSchema("a", { not: { type: "string" } }).length, 1);
+  assert.equal(
+    validateJsonSchema(
+      { a: "str" },
+      { type: "object", additionalProperties: { type: "number" } },
+    ).length,
+    1,
+  );
+  assert.equal(
+    validateJsonSchema(
+      [1, "x"],
+      { type: "array", items: [{ type: "number" }, { type: "number" }] },
+    ).length,
+    1,
+  );
+  assert.deepEqual(
+    validateJsonSchema(
+      { "x-1": 5 },
+      {
+        type: "object",
+        patternProperties: { "^x-": { type: "number" } },
+        additionalProperties: false,
+      },
+    ),
+    [],
   );
 });

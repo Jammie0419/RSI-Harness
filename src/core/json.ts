@@ -1,11 +1,27 @@
 import { createHash } from "node:crypto";
 
+/**
+ * Canonical JSON, and only JSON. Values that JSON cannot round-trip are rejected
+ * rather than folded onto a neighbour: a `Date` became `{}`, `NaN` and `Infinity`
+ * became `null`, and `undefined` inside an array became `null`, so two different
+ * payloads hashed alike and overwrote each other in the artifact store.
+ */
 export function canonicalize(value) {
   if (Array.isArray(value)) {
-    return value.map(canonicalize);
+    return value.map((item) => canonicalize(item));
   }
 
-  if (value && typeof value === "object") {
+  if (value === null) return null;
+
+  if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(
+        `canonicalize accepts JSON values only; got ${
+          value.constructor?.name ?? "a non-plain object"
+        }`,
+      );
+    }
     return Object.fromEntries(
       Object.keys(value)
         .sort()
@@ -13,7 +29,17 @@ export function canonicalize(value) {
     );
   }
 
-  return value;
+  if (typeof value === "boolean" || typeof value === "string") return value;
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`canonicalize accepts JSON values only; got ${value}`);
+    }
+    // JSON has no negative zero, so both spellings are one value.
+    return Object.is(value, -0) ? 0 : value;
+  }
+
+  throw new Error(`canonicalize accepts JSON values only; got ${typeof value}`);
 }
 
 export function canonicalJson(value) {

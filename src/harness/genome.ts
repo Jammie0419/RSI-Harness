@@ -376,6 +376,23 @@ export function validateHarnessGenome(genome) {
       throw new Error(`HarnessGenome.${field} must be a string.`);
     }
   }
+  // These components own nested objects and a patch writes into them. A string or
+  // an array here used to pass validation and then either throw a bare TypeError
+  // far from the cause, or lose the written values on the next serialization.
+  for (const field of [
+    "runtime",
+    "policies",
+    "memory",
+    "model",
+    "mcp",
+    "appearance",
+  ]) {
+    const container = genome[field];
+    if (container === undefined || container === null) continue;
+    if (typeof container !== "object" || Array.isArray(container)) {
+      throw new Error(`HarnessGenome.${field} must be an object.`);
+    }
+  }
   const generatedTools = genome.generated_tools ?? [];
   const toolPolicy = genome.policies?.tool ?? {};
 
@@ -576,20 +593,25 @@ export function validateHarnessGenome(genome) {
   const skillNames = new Set();
   for (const skill of genome.skills ?? []) {
     validateSkill(skill);
-    if (typeof skill === "string" || skill.source !== undefined) continue;
-    if (skillNames.has(skill.name)) {
-      throw new Error(`Duplicate Harness Skill "${skill.name}".`);
+    // File-backed and string entries count as names too: `./skills/genome-authoring`
+    // is the skill `genome-authoring`, so an inline entry of that name would be a
+    // second copy of it.
+    const name = resourceName(skill);
+    if (name === undefined) continue;
+    if (skillNames.has(name)) {
+      throw new Error(`Duplicate Harness Skill "${name}".`);
     }
-    skillNames.add(skill.name);
+    skillNames.add(name);
   }
   const templateNames = new Set();
   for (const template of genome.prompt_templates ?? []) {
     validatePromptTemplate(template);
-    if (typeof template === "string" || template.source !== undefined) continue;
-    if (templateNames.has(template.name)) {
-      throw new Error(`Duplicate Harness prompt template "${template.name}".`);
+    const name = resourceName(template);
+    if (name === undefined) continue;
+    if (templateNames.has(name)) {
+      throw new Error(`Duplicate Harness prompt template "${name}".`);
     }
-    templateNames.add(template.name);
+    templateNames.add(name);
   }
 
   assertCompactionPolicy(genome.policies?.compaction);
@@ -702,8 +724,28 @@ export function validateHarnessGenome(genome) {
   return genome;
 }
 
+/** The basename a file-backed resource is known by, without its extension. */
+function sourceName(source) {
+  const base = source.split(/[\\/]/).filter(Boolean).at(-1) ?? source;
+  return base.replace(/\.(md|json)$/i, "");
+}
+
+/**
+ * The name an entry goes by. Inline entries carry one; a file-backed or string
+ * entry is known by its source, because that is the name Pi gives the skill or
+ * template it loads. Matching on `name` alone left those entries invisible to a
+ * patch: `remove_skill` was a silent no-op and `upsert_skill` appended a second
+ * copy under a name the first one already had.
+ */
+function resourceName(entry) {
+  if (typeof entry === "string") return sourceName(entry);
+  if (entry?.name !== undefined) return entry.name;
+  if (typeof entry?.source === "string") return sourceName(entry.source);
+  return undefined;
+}
+
 function findNamed(items, name) {
-  return items.findIndex((item) => item.name === name);
+  return items.findIndex((item) => resourceName(item) === name);
 }
 
 function requireName(operation) {
@@ -913,7 +955,9 @@ export function applyHarnessPatch(parent, patch) {
         break;
       }
       case "remove_skill":
-        next.skills = next.skills.filter((skill) => skill.name !== operation.name);
+        next.skills = next.skills.filter(
+          (skill) => resourceName(skill) !== operation.name,
+        );
         break;
       case "upsert_prompt_template": {
         const template = {
@@ -929,7 +973,7 @@ export function applyHarnessPatch(parent, patch) {
       }
       case "remove_prompt_template":
         next.prompt_templates = next.prompt_templates.filter(
-          (template) => template.name !== operation.name,
+          (template) => resourceName(template) !== operation.name,
         );
         break;
       case "upsert_generated_tool": {

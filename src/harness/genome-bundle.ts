@@ -38,6 +38,18 @@ const COMPONENT_FIELDS = Object.freeze({
   resources: ["resources"],
 });
 
+/**
+ * Drops top-level `null` fields, which mean "inherit this from the base" rather
+ * than "set it to null". Only the top level: nested nulls are real values, like
+ * the `thinkingLevelMap: { off: null }` a model entry carries.
+ */
+function withoutInheritedKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== null),
+  );
+}
+
 const COMPONENT_OPERATIONS = Object.freeze({
   instructions: ["set_system_prompt", "append_system_prompt"],
   tools: [
@@ -185,7 +197,10 @@ function loadGenomeDocument(path, stack) {
   const value = readJson(absolutePath, "Harness Genome");
   if (value?.genome_schema_version !== "3") {
     return {
-      genome: validateHarnessGenome(value),
+      // A `null` at the top level means "hand this field back to the inherited
+      // default", the way it does in a bundle's overrides. Validating it as-is
+      // made some fields reject the file outright and left others holding null.
+      genome: validateHarnessGenome(withoutInheritedKeys(value)),
       components: [],
       baseDirectory: dirname(absolutePath),
       manifestPath: absolutePath,

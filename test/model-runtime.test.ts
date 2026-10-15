@@ -780,3 +780,68 @@ test("ModelRuntime retries malformed structured output with feedback", async () 
     /prior TestAnswer was invalid/,
   );
 });
+
+test("tools are sent without strict mode", async () => {
+  // Strict mode only accepts schemas in which every property is required and
+  // optional ones are nullable, and converting Pi's tool schemas into that shape
+  // is pi-ai's own helper. Claiming strict without the conversion makes the
+  // provider reject the whole request as soon as a tool is attached.
+  const payloads = [];
+  const runtime = new ModelRuntime({
+    profiles: {
+      responses: {
+        kind: "http",
+        api: "openai-responses",
+        provider: "gpt",
+        model: "gpt-5",
+        base_url: "https://example.invalid/v1",
+        api_key: "k",
+      },
+      chat: {
+        kind: "http",
+        api: "openai-completions",
+        provider: "local",
+        model: "local-model",
+        base_url: "https://example.invalid/v1",
+        api_key: "k",
+      },
+    },
+    fetchImpl: async (_url, options) => {
+      payloads.push(JSON.parse(options.body));
+      return new Response(
+        JSON.stringify({
+          id: "r",
+          status: "completed",
+          output: [],
+          usage: {},
+          choices: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+  const tools = [
+    {
+      name: "read",
+      description: "Read a file.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, offset: { type: "number" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  ];
+
+  for (const profile of ["responses", "chat"]) {
+    await runtime
+      .generate(profile, { messages: [{ role: "user", content: "hi" }], tools })
+      .catch(() => undefined);
+  }
+
+  const [responses, chat] = payloads;
+  assert.equal(responses.tools[0].strict, undefined);
+  assert.equal(chat.tools[0].function.strict, undefined);
+  // The schema travels as the Genome wrote it: the conversion is Pi's job.
+  assert.deepEqual(responses.tools[0].parameters.required, ["path"]);
+});

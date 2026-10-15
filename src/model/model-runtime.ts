@@ -18,6 +18,14 @@ function parseArguments(value) {
   }
 }
 
+/**
+ * Tools travel without `strict`. Pi's own default is non-strict for the very
+ * reason a custom provider cannot fix here: strict mode only accepts schemas in
+ * which every property is required and optional ones are nullable, and turning
+ * a Pi tool schema into that shape is `getJsonSchemaToolParameters`, which lives
+ * inside pi-ai. Claiming strict without the conversion makes the provider reject
+ * the whole request.
+ */
 function normalizeTools(tools = []) {
   return tools.map((tool) => ({
     name: tool.name,
@@ -27,20 +35,16 @@ function normalizeTools(tools = []) {
       properties: {},
       additionalProperties: false,
     },
-    strict: tool.strict !== false,
   }));
 }
 
-function toChatTools(tools, profile) {
+function toChatTools(tools) {
   return normalizeTools(tools).map((tool) => ({
     type: "function",
     function: {
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
-      ...(profile.compat?.supportsStrictMode === false
-        ? {}
-        : { strict: tool.strict }),
     },
   }));
 }
@@ -440,7 +444,6 @@ export class ModelRuntime {
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters,
-                strict: tool.strict,
               }))
             : undefined,
           max_output_tokens: request.maxTokens ?? profile.max_tokens,
@@ -452,7 +455,7 @@ export class ModelRuntime {
           ...extraBody,
           model: profile.model,
           messages: toChatMessages(request.system, request.messages),
-          tools: tools.length ? toChatTools(tools, profile) : undefined,
+          tools: tools.length ? toChatTools(tools) : undefined,
           max_tokens: request.maxTokens ?? profile.max_tokens,
           temperature: request.temperature,
           thinking: request.thinking ?? profile.thinking,
