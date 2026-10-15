@@ -50,7 +50,12 @@ async function runLauncher(argv) {
 }
 
 if (isEntryPoint(import.meta.url)) {
-  runLauncher(process.argv.slice(2)).catch((error) => {
+  // Expanded before the supervisor sees argv: a restart rebuilds the child's
+  // arguments from the list it was given, so a Genome shorthand left in the
+  // middle of that list would reach Pi as a message instead of naming a Genome.
+  // `runCli` expands again, which is idempotent once the first argument is
+  // already `--genome`.
+  runLauncher(expandGenomeShorthand(process.argv.slice(2))).catch((error) => {
     console.error(`rsih: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   });

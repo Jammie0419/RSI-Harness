@@ -273,7 +273,10 @@ export function rsiHeaderLines(
     ...columns,
     color(`╰${horizontal}╯`),
   ];
-  return lines;
+  // The frame is laid out for a minimum of 24 columns, but Pi's renderer throws
+  // -- and takes the process down with it -- as soon as a line is wider than the
+  // terminal. Clipping makes a window narrower than that ugly instead of fatal.
+  return lines.map((line) => truncateToWidth(line, Math.max(1, width), ""));
 }
 
 export class RsiHeader implements Component {

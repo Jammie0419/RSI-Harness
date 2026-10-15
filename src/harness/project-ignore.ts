@@ -16,17 +16,16 @@ export const PROJECT_CONFIG_DIRECTORY = CONFIG_DIR_NAME;
 const IGNORE_LINE = `${PROJECT_CONFIG_DIRECTORY}/`;
 
 /**
- * Spellings that already cover the directory. A trailing-only slash carries no
- * path separators, so git matches the pattern at any depth -- which is what the
- * appended line relies on, and what these are equivalent to.
+ * Spellings that already cover the directory *at any depth*, which is what the
+ * appended line relies on. A leading slash anchors a pattern to the work tree
+ * root in git, so `/.rsih/` covers only the root and is deliberately absent:
+ * counting it as coverage would leave a `.rsih` in a subdirectory committable.
  */
 const COVERING_SPELLINGS = new Set([
   PROJECT_CONFIG_DIRECTORY,
   `${PROJECT_CONFIG_DIRECTORY}/`,
-  `/${PROJECT_CONFIG_DIRECTORY}`,
-  `/${PROJECT_CONFIG_DIRECTORY}/`,
-  `**/${PROJECT_CONFIG_DIRECTORY}/`,
   `**/${PROJECT_CONFIG_DIRECTORY}`,
+  `**/${PROJECT_CONFIG_DIRECTORY}/`,
 ]);
 
 /** The work tree root above `directory`, or undefined outside a repository. */

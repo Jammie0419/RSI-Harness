@@ -131,6 +131,13 @@ export function parseCliArgs(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    // `--` ends option parsing for Pi: everything after it is a message or a
+    // file reference, so it has to reach Pi untouched -- including anything that
+    // looks like one of RSIH's own options.
+    if (argument === "--") {
+      result.piArgs.push(...argv.slice(index));
+      break;
+    }
     // Pi accepts both `--option value` and `--option=value`. RSIH consumes its
     // own options before Pi parses argv, so it has to understand both
     // spellings — otherwise `--genome=paperlab` falls through to Pi untouched and
@@ -206,22 +213,34 @@ const PRINT_ONLY_ARGUMENTS = new Set([
 ]);
 
 function printsOnly(args) {
-  return args.some((argument) => PRINT_ONLY_ARGUMENTS.has(argument));
+  return optionArguments(args).some((argument) =>
+    PRINT_ONLY_ARGUMENTS.has(argument),
+  );
+}
+
+/**
+ * The arguments up to a `--`. Pi treats everything after one as a message or a
+ * file reference, so nothing beyond it is an option RSIH may read.
+ */
+function optionArguments(args) {
+  const end = args.indexOf("--");
+  return end === -1 ? args : args.slice(0, end);
 }
 
 function optionValue(args, name) {
+  const options = optionArguments(args);
   const equalsPrefix = `${name}=`;
-  for (let index = args.length - 1; index >= 0; index -= 1) {
-    if (args[index].startsWith(equalsPrefix)) {
-      return args[index].slice(equalsPrefix.length);
+  for (let index = options.length - 1; index >= 0; index -= 1) {
+    if (options[index].startsWith(equalsPrefix)) {
+      return options[index].slice(equalsPrefix.length);
     }
-    if (args[index] === name) return args[index + 1];
+    if (options[index] === name) return options[index + 1];
   }
   return undefined;
 }
 
 function hasOption(args, ...names) {
-  return args.some((argument) =>
+  return optionArguments(args).some((argument) =>
     names.some((name) => argument === name || argument.startsWith(`${name}=`)),
   );
 }

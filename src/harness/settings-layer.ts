@@ -7,8 +7,20 @@ export const RSIH_MANAGED_MARKER = "$rsih";
 
 function readJsonFile(path) {
   if (!existsSync(path)) return {};
+  let text;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    text = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  // Pi reads these files through `stripBom` and treats an empty one as `{}`.
+  // Without the same two steps here, a BOM an editor on Windows left behind --
+  // or a file that was truncated to zero -- looks malformed, the compiled patch
+  // is dropped, and every key the Genome declares stays silently unapplied.
+  const content = text.replace(/^\uFEFF/, "");
+  if (content.trim() === "") return {};
+  try {
+    const parsed = JSON.parse(content);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed
       : undefined;

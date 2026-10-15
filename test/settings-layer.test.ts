@@ -37,6 +37,36 @@ test("managed settings reassert Genome keys and preserve everything else", () =>
   ]);
 });
 
+test("a settings file with a BOM or nothing in it still compiles", () => {
+  // Pi reads both files through `stripBom` and treats an empty one as `{}`.
+  // RSIH used to call the same file malformed and drop the whole patch without
+  // a word, which silently switched off every key the Genome declared.
+  const directory = mkdtempSync(join(tmpdir(), "rsih-settings-bom-"));
+  const settingsPath = join(directory, "settings.json");
+  writeFileSync(
+    settingsPath,
+    `\uFEFF${JSON.stringify({ theme: "light" })}\n`,
+    "utf8",
+  );
+  const withBom = applyManagedConfiguration({
+    agentDirectory: directory,
+    settings: { quietStartup: true },
+    keybindings: {},
+    stamp: STAMP,
+  });
+  assert.equal(withBom.settings.quietStartup, true);
+  assert.equal(withBom.settings.theme, "light");
+
+  writeFileSync(settingsPath, "", "utf8");
+  const empty = applyManagedConfiguration({
+    agentDirectory: directory,
+    settings: { quietStartup: true },
+    keybindings: {},
+    stamp: STAMP,
+  });
+  assert.equal(empty.settings.quietStartup, true);
+});
+
 test("switching Genomes releases keys the new Genome does not claim", () => {
   const merged = mergeManagedSettings(
     {

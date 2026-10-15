@@ -8,13 +8,22 @@ import {
   assertSettingsPatch,
 } from "./pi-projection.ts";
 
+/**
+ * Tool names a generated tool may not take: Pi's own tools, the legacy `list`
+ * spelling this code maps onto `ls`, and the two tools RSIH registers itself.
+ * A generated tool that took one of these would shadow the real implementation
+ * rather than extend it.
+ */
 export const PROTECTED_BUILTIN_TOOL_NAMES = Object.freeze([
   "read",
   "list",
+  "ls",
   "grep",
+  "find",
   "write",
   "edit",
   "bash",
+  "powershell",
   "load_skill",
   "scratchpad",
 ]);
@@ -433,7 +442,9 @@ export function validateHarnessGenome(genome) {
   );
   if (
     runtime.thinking_level !== undefined &&
-    !["off", "minimal", "low", "medium", "high", "xhigh"].includes(
+    // Pi's full ladder, `max` included: the drift test covers settings and
+    // keybindings, not this enumeration, so it has to be stated correctly here.
+    !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
       runtime.thinking_level,
     )
   ) {

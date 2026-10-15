@@ -267,6 +267,25 @@ test("RSIH TUI keeps a fixed column divider and compacts long workspaces", () =>
   assert.match(plain, /Workspace: ~\/\.\.\.\/dopapers\/rsih/);
 });
 
+test("the header never renders a line wider than the terminal", () => {
+  // Pi's renderer throws -- and takes the process down -- as soon as a line is
+  // wider than the terminal, and this frame is laid out for 24 columns.
+  for (const width of [1, 12, 23, 24, 60]) {
+    const lines = rsiHeaderLines(
+      width,
+      { cwd: "/repo", model: "m", genome: "default", version: "0.1.0" },
+      (text) => text,
+      (text) => text,
+    );
+    for (const line of lines) {
+      assert.ok(
+        visibleWidth(line) <= Math.max(1, width),
+        `width ${width}: ${JSON.stringify(line)}`,
+      );
+    }
+  }
+});
+
 test("RSIH editor preserves Pi cursor marker when padding is zero", () => {
   const tui = { terminal: { rows: 42 }, requestRender() {} };
   const theme = {
@@ -623,6 +642,22 @@ test("RSIH options accept both --option value and --option=value", () => {
   assert.throws(() => parseCliArgs(["--genome="]), /--genome requires a value/);
 });
 
+test("arguments after -- reach Pi as messages, not as RSIH options", () => {
+  // Pi ends option parsing at `--`. RSIH consumed its own options past it, which
+  // ate messages and could switch Genome or change directory on them.
+  const parsed = parseCliArgs(["-p", "--", "--genome", "foo", "--cwd", "/tmp"]);
+  assert.equal(parsed.genome, undefined);
+  assert.equal(parsed.cwd, ".");
+  assert.deepEqual(parsed.piArgs, [
+    "-p",
+    "--",
+    "--genome",
+    "foo",
+    "--cwd",
+    "/tmp",
+  ]);
+});
+
 test("launching with the +name shorthand resolves that Genome", () => {
   // The unit tests cover the rewrite; this covers the wiring in src/cli.ts,
   // which is the part that can silently not be called.
@@ -695,6 +730,14 @@ test("installing carries the whole payload, not just the executable", () => {
   assert.match(installScript, /npm run --silent install:binary/);
   // And it has to prove the payload arrived rather than trust the copy.
   assert.match(installScript, /rsih" genome validate paperlab/);
+
+  // The npm/dist layout resolves Pi's HTML export template under `dist/src/core`;
+  // without that copy `--export` and `/export` fail with ENOENT.
+  const copyAssetsScript = readFileSync(
+    join(codeDirectory, "scripts", "copy-build-assets.ts"),
+    "utf8",
+  );
+  assert.match(copyAssetsScript, /"export-html"/);
 });
 
 test("a linked entry point is recognised, not silently ignored", () => {

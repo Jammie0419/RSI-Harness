@@ -38,6 +38,25 @@ rmSync(genomesTarget, { recursive: true, force: true });
 cpSync(resolve("config", "genomes"), genomesTarget, { recursive: true });
 console.log(`Copied built-in Genomes to ${genomesTarget}`);
 
+// Pi's HTML exporter reads its template from `<packageDir>/<src|dist>/core/export-html`,
+// which for this layout is `dist/src/core/export-html`. Without it `--export`
+// and the `/export` command fail with ENOENT.
+const exportTemplateTarget = join(distDirectory, "src", "core", "export-html");
+rmSync(exportTemplateTarget, { recursive: true, force: true });
+cpSync(
+  resolve(
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "dist",
+    "core",
+    "export-html",
+  ),
+  exportTemplateTarget,
+  { recursive: true },
+);
+console.log(`Copied Pi's export templates to ${exportTemplateTarget}`);
+
 // Pi reads `piConfig` from the package.json at PI_PACKAGE_DIR to learn which
 // distribution it is. Without this copy a compiled `dist/` has no package.json,
 // so Pi calls itself `pi`: the version reads 0.0.0 and the config directory

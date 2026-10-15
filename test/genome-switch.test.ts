@@ -81,6 +81,24 @@ test("a Genome that appends nothing drops the previous instructions", () => {
   assert.equal(switched.prompt, assembled({}));
 });
 
+test("prompt text is spliced literally, not as a replacement pattern", () => {
+  // `String.replace` reads `$&`, `$$`, `$'` and friends in the replacement, so a
+  // Genome whose instructions contain one of those used to have the previous
+  // Genome's block spliced into the new one, with no caveat to show for it.
+  const startup = startupPromptRecord({ appendPrompt: "OLD BLOCK" });
+  const switched = switchedSystemPrompt({
+    base: assembled({ appendPrompt: "OLD BLOCK" }),
+    options: options({ appendPrompt: "OLD BLOCK" }),
+    startup,
+    target: { appendPrompt: "NEW $& BLOCK" },
+  });
+
+  assert.deepEqual(switched.caveats, []);
+  assert.equal(switched.prompt.includes("NEW OLD BLOCK BLOCK"), false);
+  // Byte-identical to what a restart under the new Genome would have produced.
+  assert.equal(switched.prompt, assembled({ appendPrompt: "NEW $& BLOCK" }));
+});
+
 test("swapping a base system prompt replaces it in place", () => {
   const startup = startupPromptRecord({
     systemPrompt: "You only plan.",
