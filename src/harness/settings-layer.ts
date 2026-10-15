@@ -5,6 +5,13 @@ import { cloneJson } from "../core/json.ts";
 /** Marker key recording which Genome owns which settings in a generated file. */
 export const RSIH_MANAGED_MARKER = "$rsih";
 
+/**
+ * Settings RSIH itself needs regardless of Genome. RSIH draws its own header,
+ * so Pi's startup resource listing would be printed twice; `quietStartup`
+ * suppresses the listing without disabling any resource.
+ */
+export const RSIH_BASE_SETTINGS = Object.freeze({ quietStartup: true });
+
 function readJsonFile(path) {
   if (!existsSync(path)) return {};
   let text;

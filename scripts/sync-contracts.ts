@@ -13,17 +13,47 @@ import { join, resolve } from "node:path";
  * after editing any contract.
  */
 const source = resolve("docs", "genome", "components");
-const bundles = ["paperlab", "harness-rsi"];
-
 const contracts = readdirSync(source).filter((name) => name.endsWith(".dev.md"));
 if (contracts.length === 0) {
   throw new Error(`No contracts found in ${source}.`);
 }
 
-for (const bundle of bundles) {
-  const target = resolve("config", "genomes", bundle, "contracts");
+/**
+ * Bundles that carry every contract. The seeds and their examples copies are
+ * compared byte-for-byte by the tests, so all of them are synced here.
+ */
+const completeBundles = [
+  resolve("config", "genomes", "paperlab"),
+  resolve("config", "genomes", "harness-rsi"),
+  resolve("examples", "genomes", "paperlab"),
+];
+for (const bundle of completeBundles) {
+  const target = join(bundle, "contracts");
   for (const name of contracts) {
     copyFileSync(join(source, name), join(target, name));
   }
   console.log(`Synced ${contracts.length} contracts to ${target}`);
+}
+
+/**
+ * Bundles that ship only the contracts their manifests reference; update what
+ * is there rather than adding contracts the bundle does not use.
+ */
+const partialBundles = [resolve("examples", "genomes", "parallel-search")];
+for (const bundle of partialBundles) {
+  const target = join(bundle, "contracts");
+  let shipped;
+  try {
+    shipped = readdirSync(target);
+  } catch {
+    continue;
+  }
+  let synced = 0;
+  for (const name of shipped) {
+    if (contracts.includes(name)) {
+      copyFileSync(join(source, name), join(target, name));
+      synced += 1;
+    }
+  }
+  console.log(`Synced ${synced} referenced contracts to ${target}`);
 }

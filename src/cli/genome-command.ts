@@ -16,12 +16,13 @@ import {
   seedStatus,
   userGenomeDirectory,
 } from "../harness/genome-loader.ts";
+import { RSIH_VERSION } from "../core/version.ts";
 import { projectGenomeSettings } from "../harness/pi-projection.ts";
 import {
   applyManagedConfiguration,
   mergeManagedSettings,
+  RSIH_BASE_SETTINGS,
 } from "../harness/settings-layer.ts";
-import { RSIH_BASE_SETTINGS, RSIH_VERSION } from "../pi-cli-runtime.ts";
 
 const USAGE = `Usage: rsih genome <command>
 

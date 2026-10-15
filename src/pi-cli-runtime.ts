@@ -60,16 +60,17 @@ import {
   projectGenomeResources,
   projectGenomeSettings,
 } from "./harness/pi-projection.ts";
-import { applyManagedConfiguration } from "./harness/settings-layer.ts";
+import {
+  applyManagedConfiguration,
+  RSIH_BASE_SETTINGS,
+} from "./harness/settings-layer.ts";
 import { runGenomeCommand } from "./cli/genome-command.ts";
 import {
   SUPERVISED_ENV,
   SWITCHED_FROM_ENV,
   writeSwitchRequest,
 } from "./cli/supervisor.ts";
-
-/** Kept in sync with package.json; shown in the header and settings stamp. */
-export const RSIH_VERSION = "0.1.0";
+import { RSIH_VERSION } from "./core/version.ts";
 
 const EMPTY_USAGE: Usage = {
   input: 0,
@@ -118,13 +119,6 @@ const RSIH_FLAG_DESCRIPTIONS = Object.freeze([
   ["max-turns", "Abort the agent after this many turns."],
   ["run-id", "Session id to create or reuse (Pi's --session-id)."],
 ]);
-
-/**
- * Settings RSIH itself needs regardless of Genome. RSIH draws its own header,
- * so Pi's startup resource listing would be printed twice; `quietStartup`
- * suppresses the listing without disabling any resource.
- */
-export const RSIH_BASE_SETTINGS = Object.freeze({ quietStartup: true });
 
 function requireValue(argv, index, option) {
   const value = argv[index + 1];

@@ -27,9 +27,9 @@ import {
   parseCliArgs,
   reportSessionWarning,
   resumeGenomeNotice,
-  RSIH_VERSION,
   versionRequested,
 } from "../src/pi-cli-runtime.ts";
+import { RSIH_VERSION } from "../src/core/version.ts";
 import {
   genomeResourceIsolationArgs,
   projectGenomeResources,
@@ -945,6 +945,13 @@ test("--version answers for RSIH, not for the Pi it embeds", () => {
   // After `--` the same word is a message, not a flag.
   const message = runCli(directory, ["-p", "--", "--version"]);
   assert.notEqual(message.stdout.trim(), RSIH_VERSION);
+});
+
+test("RSIH_VERSION stays in sync with package.json", () => {
+  const packageJson = JSON.parse(
+    readFileSync(join(codeDirectory, "package.json"), "utf8"),
+  );
+  assert.equal(RSIH_VERSION, packageJson.version);
 });
 
 test("a version request is a flag, never an option's value", () => {

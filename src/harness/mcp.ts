@@ -1,6 +1,7 @@
 import { resolve, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { RSIH_VERSION } from "../core/version.ts";
 
 const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
@@ -63,7 +64,10 @@ export async function createMcpTools({ cwd, genome }) {
         cwd: resolveInside(cwd, server.cwd),
         stderr: "inherit",
       });
-      client = new Client({ name: "rsih", version: "0.1.0" }, { capabilities: {} });
+      client = new Client(
+        { name: "rsih", version: RSIH_VERSION },
+        { capabilities: {} },
+      );
       await client.connect(transport, {
         timeout: server.startup_timeout_ms ?? DEFAULT_STARTUP_TIMEOUT_MS,
       });
