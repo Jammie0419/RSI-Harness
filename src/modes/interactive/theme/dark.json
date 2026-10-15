@@ -31,6 +31,9 @@
     "text": "text",
     "thinkingText": "gray",
     "selectedBg": "selectedBg",
+    "scrollbarThumb": "selectedBg",
+    "searchMatchBg": "selectedBg",
+    "searchMatchText": "text",
     "userMessageBg": "userMsgBg",
     "userMessageText": "text",
     "customMessageBg": "customMsgBg",
@@ -69,6 +72,7 @@
     "thinkingMedium": "#81a2be",
     "thinkingHigh": "#b294bb",
     "thinkingXhigh": "#d183e8",
+    "thinkingMax": "#ff5fff",
     "bashMode": "green"
   },
   "export": {

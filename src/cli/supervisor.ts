@@ -20,7 +20,15 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { constants } from "node:os";
 import { join } from "node:path";
 
 /** Set on the child so it knows a supervisor is waiting to restart it. */
@@ -54,11 +62,16 @@ function requestPath(agentDirectory) {
 
 /**
  * Written by the child just before it asks Pi to quit. Synchronous on purpose:
- * Pi's shutdown ends the process, so the write has to be complete first.
+ * Pi's shutdown ends the process, so the write has to be complete first. The
+ * rename keeps a supervisor that reads at the wrong moment from seeing half a
+ * request and dropping it as malformed.
  */
 export function writeSwitchRequest(agentDirectory, request) {
+  const target = requestPath(agentDirectory);
   mkdirSync(agentDirectory, { recursive: true });
-  writeFileSync(requestPath(agentDirectory), `${JSON.stringify(request)}\n`, "utf8");
+  const temporary = `${target}.tmp-${process.pid}`;
+  writeFileSync(temporary, `${JSON.stringify(request)}\n`, "utf8");
+  renameSync(temporary, target);
 }
 
 /** Read and remove the request, so a crash later can never replay it. */
@@ -184,9 +197,11 @@ export async function supervise({
         continue;
       }
       if (outcome.signal) {
-        // Die the way the child did, so a caller's `$?` reads the same.
-        process.kill(process.pid, outcome.signal);
-        return 128;
+        // A caller's `$?` should read the same as if it had run the agent
+        // itself: 128 plus the signal number. Re-raising the signal cannot do
+        // that here -- the supervisor holds a SIGINT ignore so Ctrl-C reaches
+        // the child, and Windows has no signals to re-raise at all.
+        return 128 + (constants.signals[outcome.signal] ?? 0);
       }
       return outcome.code ?? 0;
     }

@@ -29,7 +29,7 @@ export async function runCli(argv = process.argv.slice(2)) {
  * agent on the same session under a different Genome. See `cli/supervisor.ts`
  * for why that needs a process boundary. Everything else runs in-process.
  */
-async function runLauncher(argv) {
+export async function runLauncher(argv) {
   const { SUPERVISED_ENV, supervise, wantsInteractive } = await import(
     "./cli/supervisor.ts"
   );

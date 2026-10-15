@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
 // Importing the rsih entry sets PI_PACKAGE_DIR, RSIH_CODING_AGENT_DIR and the
-// version-check opt-out in one place. `gee` must not duplicate that setup.
-import { runCli } from "../cli.ts";
+// version-check opt-out in one place, and `runLauncher` gives `gee` the same
+// interactive supervisor `rsih` gets -- `/switch-genome` has to restart the
+// process there too, or the switch would have no one to consume its request.
+// `gee` must not duplicate any of that setup.
+import { runLauncher } from "../cli.ts";
 import { expandGenomeShorthand } from "../cli/genome-shorthand.ts";
 import { isEntryPoint } from "../cli/entry-point.ts";
 
@@ -35,7 +38,7 @@ export function geeArgs(argv) {
 }
 
 export async function runGeeCli(argv = process.argv.slice(2)) {
-  return runCli(geeArgs(argv));
+  return runLauncher(geeArgs(argv));
 }
 
 if (isEntryPoint(import.meta.url)) {

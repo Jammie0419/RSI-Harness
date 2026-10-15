@@ -496,6 +496,15 @@ export function validateHarnessGenome(genome) {
       throw new Error(`Harness MCP server "${server.name}" args must be strings.`);
     }
     if (
+      server.startup_timeout_ms !== undefined &&
+      (!Number.isInteger(server.startup_timeout_ms) ||
+        server.startup_timeout_ms < 1)
+    ) {
+      throw new Error(
+        `Harness MCP server "${server.name}" startup_timeout_ms must be a positive integer.`,
+      );
+    }
+    if (
       server.enabled !== undefined &&
       typeof server.enabled !== "boolean"
     ) {

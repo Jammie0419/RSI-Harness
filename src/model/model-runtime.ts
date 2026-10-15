@@ -262,11 +262,20 @@ function parseRetryAfterMs(value) {
   return Math.max(0, timestamp - Date.now());
 }
 
+/**
+ * A `Retry-After` is how long the provider would like us to wait, not a
+ * promise: a day-long or overflowing value must not park a run, so the
+ * server-supplied window is capped. The Genome's configured base delay is left
+ * alone -- that one is the user's own choice.
+ */
+const MAX_RETRY_AFTER_MS = 300_000;
+
 function rateLimitDelayMs(response, baseDelayMs, jitterRatio, random) {
-  const retryAfterMs = parseRetryAfterMs(
-    response.headers.get("retry-after"),
+  const retryAfterMs = Math.min(
+    parseRetryAfterMs(response.headers.get("retry-after")) ?? 0,
+    MAX_RETRY_AFTER_MS,
   );
-  const minimumDelayMs = Math.max(baseDelayMs, retryAfterMs ?? 0);
+  const minimumDelayMs = Math.max(baseDelayMs, retryAfterMs);
   return Math.round(
     minimumDelayMs + minimumDelayMs * jitterRatio * random(),
   );
@@ -288,6 +297,17 @@ function modelRequestFailedError(attempts, cause) {
     { cause },
   );
   error.code = "MODEL_REQUEST_FAILED";
+  return error;
+}
+
+/**
+ * A non-retryable HTTP status from the provider. The code makes the retry loop
+ * hand it straight to the caller instead of retrying it like a transport
+ * failure and burying the real status.
+ */
+function modelRequestHttpError(message) {
+  const error = new Error(message);
+  error.code = "MODEL_REQUEST_HTTP";
   return error;
 }
 
@@ -614,7 +634,10 @@ export class ModelRuntime {
           contextInputReduced ||
           [408, 409, 429].includes(response.status) ||
           response.status >= 500;
-        if (!retryable || attempt === maxRetries) {
+        if (!retryable) {
+          throw modelRequestHttpError(message);
+        }
+        if (attempt === maxRetries) {
           throw new Error(message);
         }
         if (response.status === 429) {
@@ -631,7 +654,8 @@ export class ModelRuntime {
         if (request.signal?.aborted) throw error;
         if (
           error?.code === "MODEL_REQUEST_TIMEOUT" ||
-          error?.code === "MODEL_REQUEST_FAILED"
+          error?.code === "MODEL_REQUEST_FAILED" ||
+          error?.code === "MODEL_REQUEST_HTTP"
         ) {
           throw error;
         }

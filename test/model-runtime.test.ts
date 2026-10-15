@@ -66,6 +66,128 @@ test("loadEnvFile accepts whitespace around equals without exposing values", () 
   delete process.env.RSIH_TEST_KEY;
 });
 
+test("loadEnvFile reads dotenv spellings: export, comments, quoting", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-env-"));
+  const path = join(directory, ".env");
+  writeFileSync(
+    path,
+    [
+      "# a comment line",
+      "export RSIH_TEST_ALPHA=one",
+      "RSIH_TEST_BETA=two # trailing comment",
+      'RSIH_TEST_GAMMA="three # not a comment"',
+      "RSIH_TEST_DELTA='four'",
+      "RSIH_TEST_EPSILON=a#b",
+      "1RSIH_BAD=skip",
+      "=skip",
+    ].join("\n"),
+    "utf8",
+  );
+  const names = [
+    "RSIH_TEST_ALPHA",
+    "RSIH_TEST_BETA",
+    "RSIH_TEST_GAMMA",
+    "RSIH_TEST_DELTA",
+    "RSIH_TEST_EPSILON",
+  ];
+  for (const name of [...names, "1RSIH_BAD"]) delete process.env[name];
+
+  const loaded = loadEnvFile(path);
+
+  assert.deepEqual(loaded, names);
+  assert.equal(process.env.RSIH_TEST_ALPHA, "one");
+  assert.equal(process.env.RSIH_TEST_BETA, "two");
+  assert.equal(process.env.RSIH_TEST_GAMMA, "three # not a comment");
+  assert.equal(process.env.RSIH_TEST_DELTA, "four");
+  assert.equal(process.env.RSIH_TEST_EPSILON, "a#b");
+  assert.equal(process.env["1RSIH_BAD"], undefined);
+  for (const name of names) delete process.env[name];
+});
+
+test("a non-retryable HTTP status fails immediately, not after retries", async () => {
+  let attempts = 0;
+  const runtime = new ModelRuntime({
+    profiles: {
+      local: {
+        kind: "http",
+        api: "openai-completions",
+        provider: "local",
+        model: "local-model",
+        base_url: "http://127.0.0.1:8000/v1",
+        allow_unauthenticated: true,
+        max_retries: 3,
+      },
+    },
+    delayImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(
+        JSON.stringify({ error: { message: "invalid api key" } }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      runtime.generate("local", {
+        messages: [{ role: "user", content: "Answer." }],
+      }),
+    /invalid api key/,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("an overflowing Retry-After is capped instead of parking the run", async () => {
+  let attempts = 0;
+  const delays = [];
+  const runtime = new ModelRuntime({
+    profiles: {
+      local: {
+        kind: "http",
+        api: "openai-completions",
+        provider: "local",
+        model: "local-model",
+        base_url: "http://127.0.0.1:8000/v1",
+        allow_unauthenticated: true,
+        max_retries: 1,
+        rate_limit_retry_jitter_ratio: 0,
+      },
+    },
+    delayImpl: async (milliseconds) => delays.push(milliseconds),
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: "slow down" } }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "retry-after": "999999999",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { finish_reason: "stop", message: { content: "recovered" } },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  const result = await runtime.generate("local", {
+    messages: [{ role: "user", content: "Answer." }],
+  });
+
+  assert.equal(result.text, "recovered");
+  assert.deepEqual(delays, [300_000]);
+});
+
 test("provider profile resolves model, endpoint, and key from named env fields", () => {
   const profile = resolveProviderProfile(
     "local",

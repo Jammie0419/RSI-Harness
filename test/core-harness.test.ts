@@ -569,6 +569,85 @@ test("an MCP server that fails is isolated and reported, not fatal", async () =>
   }
 });
 
+test("a server that never answers is bounded by startup_timeout_ms", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rsih-mcp-timeout-"));
+  const goodPath = join(directory, "echo-server.ts");
+  const url = (path) => new URL(path, import.meta.url).href;
+  await writeFile(
+    goodPath,
+    [
+      `import { Server } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js"))};`,
+      `import { StdioServerTransport } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js"))};`,
+      `import { CallToolRequestSchema, ListToolsRequestSchema } from ${JSON.stringify(url("../node_modules/@modelcontextprotocol/sdk/dist/esm/types.js"))};`,
+      `const server = new Server({ name: "echo", version: "1.0.0" }, { capabilities: { tools: {} } });`,
+      `server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", description: "Echo.", inputSchema: { type: "object", properties: {} } }] }));`,
+      `server.setRequestHandler(CallToolRequestSchema, async (request) => ({ content: [{ type: "text", text: JSON.stringify(request.params.arguments) }] }));`,
+      `await server.connect(new StdioServerTransport());`,
+    ].join("\n"),
+    "utf8",
+  );
+
+  const started = Date.now();
+  const mcp = await createMcpTools({
+    cwd: directory,
+    genome: createHarnessGenome({
+      genome_id: "harness:mcp-startup-timeout",
+      mcp: {
+        servers: [
+          {
+            name: "good",
+            command: process.execPath,
+            args: ["--experimental-strip-types", goodPath],
+          },
+          {
+            name: "hung",
+            command: process.execPath,
+            args: ["-e", "setInterval(() => {}, 1000);"],
+            startup_timeout_ms: 1000,
+          },
+        ],
+      },
+    }),
+  });
+
+  try {
+    // The hung handshake ends on the configured bound rather than the SDK's
+    // 60-second default, and the healthy server is unaffected. Closing the
+    // half-connected client also ends the hung child, which is why this test
+    // process is able to exit at all.
+    assert.ok(
+      Date.now() - started < 30_000,
+      "the handshake must not wait for the default timeout",
+    );
+    assert.deepEqual(
+      mcp.tools.map((tool) => tool.name),
+      ["good_echo"],
+    );
+    assert.equal(mcp.errors.length, 1);
+    assert.match(mcp.errors[0], /^hung: /);
+    assert.equal(await mcp.tools[0].execute({ value: "ok" }), '{"value":"ok"}');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("startup_timeout_ms must be a positive integer", () => {
+  for (const value of [0, -1, 1.5, "1000"]) {
+    assert.throws(
+      () =>
+        createHarnessGenome({
+          genome_id: "harness:mcp-timeout-invalid",
+          mcp: {
+            servers: [
+              { name: "server", command: "node", startup_timeout_ms: value },
+            ],
+          },
+        }),
+      /startup_timeout_ms/,
+    );
+  }
+});
+
 test("a project's RSIH directory is added to that project's ignore rules", async () => {
   const root = await mkdtemp(join(tmpdir(), "rsih-project-ignore-"));
   const project = join(root, "project");

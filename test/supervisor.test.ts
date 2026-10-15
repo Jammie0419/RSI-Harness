@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -192,6 +198,40 @@ test("a request left by a crash is honoured, but a restart storm is not", async 
     assert.equal(calls.length, 6);
     assert.match(written.join(""), /refusing to restart/);
     assert.equal(existsSync(join(directory, ".switch-genome.json")), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a signalled child reports the conventional 128+signal exit code", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-sup-"));
+  try {
+    const calls = [];
+    // Ctrl-C reaches the child directly; the supervisor's `$?` has to read the
+    // same as if the shell had run the agent itself.
+    const code = await supervise({
+      command: "rsih",
+      baseArgs: [],
+      argv: [],
+      agentDirectory: directory,
+      env: {},
+      spawnChild: scriptedSpawn([{ signal: "SIGINT" }], calls),
+    });
+    assert.equal(code, 130);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a switch request replaces the previous file atomically", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-sup-"));
+  try {
+    writeFileSync(join(directory, ".switch-genome.json"), "{torn", "utf8");
+    writeSwitchRequest(directory, { reference: "debate" });
+    // No temporary file is left behind, and the stale request is replaced
+    // whole: a reader at the wrong moment can never see half of it.
+    assert.deepEqual(readdirSync(directory), [".switch-genome.json"]);
+    assert.deepEqual(takeSwitchRequest(directory), { reference: "debate" });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

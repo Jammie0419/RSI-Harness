@@ -192,7 +192,7 @@ turn by turn: send a `prompt`, watch events stream back, `steer` mid-turn,
 
 ```bash
 rsih genome list                          # project, user, and seed layers
-rsih genome show <name|path>              # resolved Genome + settings patch (read-only)
+rsih genome show <name|path>              # resolved Genome + the Pi files it would write (read-only)
 rsih genome validate <name|path>          # load-check without starting anything
 rsih genome install <name|path>           # copy into ~/.rsih/genomes
 ```

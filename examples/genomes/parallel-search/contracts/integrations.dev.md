@@ -8,7 +8,8 @@ execution stay with Pi's own runtime.
 ## Config
 
 - `extensions`: Pi extension sources.
-- `mcp.servers`: stdio MCP command, arguments, environment, and exposed tools.
+- `mcp.servers`: stdio MCP command, arguments, environment, exposed tools, and an
+  optional `startup_timeout_ms` bounding the connection handshake (default 60000).
 
 ## Allowed operations
 

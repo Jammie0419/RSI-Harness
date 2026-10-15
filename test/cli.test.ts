@@ -25,7 +25,10 @@ import {
   genomeActiveToolNames,
   genomeFooterStatus,
   parseCliArgs,
+  reportSessionWarning,
+  resumeGenomeNotice,
   RSIH_VERSION,
+  versionRequested,
 } from "../src/pi-cli-runtime.ts";
 import {
   genomeResourceIsolationArgs,
@@ -942,4 +945,128 @@ test("--version answers for RSIH, not for the Pi it embeds", () => {
   // After `--` the same word is a message, not a flag.
   const message = runCli(directory, ["-p", "--", "--version"]);
   assert.notEqual(message.stdout.trim(), RSIH_VERSION);
+});
+
+test("a version request is a flag, never an option's value", () => {
+  assert.equal(versionRequested(["--version"]), true);
+  assert.equal(versionRequested(["-v"]), true);
+  assert.equal(versionRequested(["-p", "hi", "-v"]), true);
+  // The token after a value-taking option is its value, not a flag.
+  assert.equal(versionRequested(["--name", "-v"]), false);
+  assert.equal(versionRequested(["--model", "--version"]), false);
+  assert.equal(versionRequested(["--name=-v"]), false);
+  // After `--` option parsing has ended.
+  assert.equal(versionRequested(["-p", "--", "--version"]), false);
+});
+
+test("--export is a print-only run and leaves the project alone", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-export-"));
+  const project = join(directory, "project");
+  mkdirSync(project);
+  mkdirSync(join(project, ".git"));
+  writeFileSync(join(project, ".gitignore"), "node_modules/\n", "utf8");
+
+  // Exporting is not working in the project, so the run must not add the
+  // project's `.rsih` to its ignore rules on the way out.
+  runCli(directory, ["--export", "session.jsonl", "--cwd", project]);
+
+  assert.equal(
+    readFileSync(join(project, ".gitignore"), "utf8"),
+    "node_modules/\n",
+  );
+});
+
+test("the shipped themes carry every color Pi's own themes define", () => {
+  const keys = (themePath) =>
+    Object.keys(JSON.parse(readFileSync(themePath, "utf8")).colors);
+  for (const name of ["dark", "light"]) {
+    const ours = new Set(
+      keys(
+        join(codeDirectory, "src", "modes", "interactive", "theme", `${name}.json`),
+      ),
+    );
+    const pi = keys(
+      join(
+        codeDirectory,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "modes",
+        "interactive",
+        "theme",
+        `${name}.json`,
+      ),
+    );
+    const missing = pi.filter((key) => !ours.has(key));
+    assert.deepEqual(missing, [], `${name}.json is missing ${missing.join(", ")}`);
+  }
+});
+
+test("session warnings reach the TUI notification or stderr", () => {
+  const notifications = [];
+  reportSessionWarning(
+    {
+      mode: "tui",
+      ui: {
+        notify: (message, level) => notifications.push([message, level]),
+      },
+    },
+    "MCP servers that did not start: missing: boom",
+  );
+  assert.deepEqual(notifications, [
+    ["MCP servers that did not start: missing: boom", "warning"],
+  ]);
+
+  const reported = [];
+  const original = console.error;
+  console.error = (line) => reported.push(line);
+  try {
+    reportSessionWarning(
+      { mode: "print" },
+      "MCP servers that did not start: missing: boom",
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual(reported, [
+    "rsih: MCP servers that did not start: missing: boom",
+  ]);
+});
+
+test("--resume without a Genome explains the picker's limit", () => {
+  const notice = resumeGenomeNotice({
+    resumeWithoutGenome: true,
+    priorReference: "paperlab",
+    activeReference: "default",
+  });
+  assert.match(notice, /created under the "paperlab" Genome/);
+  assert.match(notice, /uses "default"/);
+  assert.match(notice, /--genome paperlab/);
+
+  // Nothing to say: not a picker run, no stored Genome, or the same one.
+  assert.equal(
+    resumeGenomeNotice({
+      resumeWithoutGenome: false,
+      priorReference: "paperlab",
+      activeReference: "default",
+    }),
+    undefined,
+  );
+  assert.equal(
+    resumeGenomeNotice({
+      resumeWithoutGenome: true,
+      priorReference: undefined,
+      activeReference: "default",
+    }),
+    undefined,
+  );
+  assert.equal(
+    resumeGenomeNotice({
+      resumeWithoutGenome: true,
+      priorReference: "default",
+      activeReference: "default",
+    }),
+    undefined,
+  );
 });

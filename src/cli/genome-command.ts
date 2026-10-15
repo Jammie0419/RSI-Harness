@@ -17,12 +17,16 @@ import {
   userGenomeDirectory,
 } from "../harness/genome-loader.ts";
 import { projectGenomeSettings } from "../harness/pi-projection.ts";
-import { mergeManagedSettings } from "../harness/settings-layer.ts";
+import {
+  applyManagedConfiguration,
+  mergeManagedSettings,
+} from "../harness/settings-layer.ts";
+import { RSIH_BASE_SETTINGS, RSIH_VERSION } from "../pi-cli-runtime.ts";
 
 const USAGE = `Usage: rsih genome <command>
 
   list                    List Genomes found in ./.rsih/genomes, ~/.rsih/genomes and the built-in seeds
-  show <name|path>        Print the resolved Genome and the Pi settings it manages
+  show <name|path>        Print the resolved Genome and the Pi files it would write
   validate <name|path>    Load and validate a Genome without starting a session
   install <name|path>     Copy a Genome into ~/.rsih/genomes. A bare name reinstalls the shipped seed.
 `;
@@ -104,13 +108,38 @@ function showGenome(reference, cwd, io) {
   io.log("Resolved Genome:");
   io.log(JSON.stringify(resolved.genome, null, 2));
   io.log("");
-  // Show the compiled result, not just the patch: what lands on disk is what
-  // the user needs to reason about.
-  io.log(`Managed Pi settings (${join(getPiAgentDir(), "settings.json")}):`);
-  io.log(JSON.stringify(projection.settings, null, 2));
+  // What lands on disk is what the user needs to reason about, so show the
+  // files as the next run would compile them -- merged with what is already
+  // there and stamped -- rather than just the Genome's patch. `write: false`
+  // keeps the command read-only.
+  const compiled = applyManagedConfiguration({
+    agentDirectory: getPiAgentDir(),
+    settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
+    keybindings: projection.keybindings,
+    stamp: {
+      genome: resolved.reference,
+      genomeId: resolved.genome.genome_id,
+      rsih: RSIH_VERSION,
+    },
+    write: false,
+  });
+  io.log(
+    `Pi settings after this Genome is applied (${join(getPiAgentDir(), "settings.json")}):`,
+  );
+  io.log(
+    compiled.settings === undefined
+      ? "(the existing file cannot be read; Pi would report it and leave it alone)"
+      : JSON.stringify(compiled.settings, null, 2),
+  );
   io.log("");
-  io.log(`Managed keybindings (${join(getPiAgentDir(), "keybindings.json")}):`);
-  io.log(JSON.stringify(projection.keybindings, null, 2));
+  io.log(
+    `Pi keybindings after this Genome is applied (${join(getPiAgentDir(), "keybindings.json")}):`,
+  );
+  io.log(
+    compiled.keybindings === undefined
+      ? "(the existing file cannot be read; Pi would report it and leave it alone)"
+      : JSON.stringify(compiled.keybindings, null, 2),
+  );
 }
 
 function validateGenome(reference, cwd, io) {

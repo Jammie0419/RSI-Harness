@@ -4,6 +4,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
+/**
+ * How long a server may take to finish the connection handshake. RSIH declares
+ * the bound itself (the MCP SDK's own default is the same 60 seconds) so a
+ * dependency upgrade cannot change it silently; a Genome can set
+ * `startup_timeout_ms` per server to shorten or lengthen it.
+ */
+const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
+
 function resolveInside(root, path = ".") {
   const absoluteRoot = resolve(root);
   const absolutePath = resolve(absoluteRoot, path);
@@ -56,7 +64,9 @@ export async function createMcpTools({ cwd, genome }) {
         stderr: "inherit",
       });
       client = new Client({ name: "rsih", version: "0.1.0" }, { capabilities: {} });
-      await client.connect(transport);
+      await client.connect(transport, {
+        timeout: server.startup_timeout_ms ?? DEFAULT_STARTUP_TIMEOUT_MS,
+      });
       clients.push(client);
       const listed = await client.listTools();
       const configured = new Map(
@@ -92,9 +102,13 @@ export async function createMcpTools({ cwd, genome }) {
         });
       }
     } catch (error) {
-      if (client && clients.includes(client)) {
+      // A client that never finished connecting is not in `clients` yet, but it
+      // still owns a transport and possibly a child process: close it here so a
+      // server that hangs or dies mid-handshake cannot leak either.
+      if (client) {
+        const index = clients.indexOf(client);
+        if (index !== -1) clients.splice(index, 1);
         await Promise.allSettled([client.close()]);
-        clients.splice(clients.indexOf(client), 1);
       }
       errors.push(
         `${server.name}: ${error instanceof Error ? error.message : String(error)}`,

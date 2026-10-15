@@ -22,6 +22,7 @@ import {
   GENOME_MANIFEST_NAME,
   HARNESS_COMPONENT_IDS,
   SEED_MARKER_NAME,
+  createHarnessGenome,
   genomeContentHash,
   genomeDisplayName,
   installGenomeBundle,
@@ -660,6 +661,50 @@ test("genome validate and show accept a bare built-in name without seeding", () 
   assert.match(runGenome(["show", "harness-rsi"], cwd), /Components: instructions/);
   // Inspection must not write to the user's home directory.
   assert.ok(!existsSync(join(cwd, ".rsih", "genomes")));
+});
+
+test("genome show prints the files the run would write, without writing", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "rsih-show-"));
+  const agent = mkdtempSync(join(tmpdir(), "rsih-show-agent-"));
+  const previousRsi = process.env.RSIH_CODING_AGENT_DIR;
+  const previousPi = process.env.PI_CODING_AGENT_DIR;
+  process.env.RSIH_CODING_AGENT_DIR = agent;
+  // Without PI_PACKAGE_DIR the embedded Pi resolves its own name, so the
+  // variable it reads in-process is the `PI_` one.
+  process.env.PI_CODING_AGENT_DIR = agent;
+  try {
+    const settingsPath = join(agent, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }), "utf8");
+    const before = readFileSync(settingsPath, "utf8");
+    const genomePath = join(cwd, "genome.json");
+    writeFileSync(
+      genomePath,
+      JSON.stringify(
+        createHarnessGenome({
+          genome_id: "harness:show-test",
+          settings: { steeringMode: "one-at-a-time" },
+        }),
+      ),
+      "utf8",
+    );
+
+    const output = runGenome(["show", genomePath], cwd);
+
+    // What lands on disk: the user's own keys survive, the managed keys are
+    // stamped, and the Genome's patch is applied on top -- not just the patch.
+    assert.match(output, /"theme": "dark"/);
+    assert.match(output, /"\$rsih"/);
+    assert.match(output, /"steeringMode": "one-at-a-time"/);
+    // Read-only: the file is byte-for-byte untouched.
+    assert.equal(readFileSync(settingsPath, "utf8"), before);
+  } finally {
+    if (previousRsi === undefined) delete process.env.RSIH_CODING_AGENT_DIR;
+    else process.env.RSIH_CODING_AGENT_DIR = previousRsi;
+    if (previousPi === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPi;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agent, { recursive: true, force: true });
+  }
 });
 
 test("installing from a path lands under the bundle's own name", async () => {

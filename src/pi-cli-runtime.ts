@@ -124,7 +124,7 @@ const RSIH_FLAG_DESCRIPTIONS = Object.freeze([
  * so Pi's startup resource listing would be printed twice; `quietStartup`
  * suppresses the listing without disabling any resource.
  */
-const RSIH_BASE_SETTINGS = Object.freeze({ quietStartup: true });
+export const RSIH_BASE_SETTINGS = Object.freeze({ quietStartup: true });
 
 function requireValue(argv, index, option) {
   const value = argv[index + 1];
@@ -224,6 +224,7 @@ const PRINT_ONLY_ARGUMENTS = new Set([
   "--version",
   "-v",
   "--list-models",
+  "--export",
 ]);
 
 function printsOnly(args) {
@@ -332,45 +333,126 @@ function sessionFiles(sessionDirectory) {
 }
 
 function readSessionEntries(path) {
+  let text;
   try {
-    return readFileSync(path, "utf8")
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    text = readFileSync(path, "utf8");
   } catch {
     return [];
   }
+  const entries = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    // A session file can be read mid-append, and one torn line must not cost
+    // every other entry: skip what does not parse and keep the rest.
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // Unreadable line.
+    }
+  }
+  return entries;
+}
+
+function sessionHeader(path) {
+  return readSessionEntries(path).find((entry) => entry.type === "session");
 }
 
 function sessionId(path) {
-  return readSessionEntries(path).find((entry) => entry.type === "session")?.id;
+  return sessionHeader(path)?.id;
 }
 
-function findSessionFile(args, sessionDirectory, cwd) {
+/**
+ * Whether a session belongs to this project, decided the way Pi's own session
+ * lookup decides it: the stored cwd resolves to the same directory.
+ */
+function sessionBelongsTo(path, cwd) {
+  const stored = sessionHeader(path)?.cwd;
+  return (
+    typeof stored === "string" &&
+    stored !== "" &&
+    resolve(expandHome(stored)) === resolve(cwd)
+  );
+}
+
+function sessionPathArgument(argument, cwd) {
+  if (
+    isAbsolute(argument) ||
+    argument.includes("/") ||
+    argument.includes("\\") ||
+    argument.endsWith(".jsonl")
+  ) {
+    return resolve(cwd, expandHome(argument));
+  }
+  return undefined;
+}
+
+/**
+ * The files Pi's `listAll` would consider: a custom session directory as-is,
+ * otherwise every project directory under the agent directory's sessions root.
+ */
+function everySessionFile(sessionDirectory, cwd) {
+  if (resolve(sessionDirectory) !== resolve(defaultSessionDirectory(cwd))) {
+    return sessionFiles(sessionDirectory);
+  }
+  const root = join(getPiAgentDir(), "sessions");
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => sessionFiles(join(root, entry.name)));
+}
+
+export function findSessionFile(args, sessionDirectory, cwd) {
+  // `--no-session` writes nothing anywhere, and `--resume` names its session
+  // only after Pi's interactive picker has run, so neither can point at a
+  // stored Genome here.
   if (hasOption(args, "--no-session", "--resume", "-r")) return undefined;
+  // A custom session directory is shared by every project pointed at it, so an
+  // id must match a session of this project first -- the filter Pi's own lookup
+  // applies. The per-project default directory is already one project's own.
+  const sharedDirectory =
+    resolve(sessionDirectory) !== resolve(defaultSessionDirectory(cwd));
+  const files = sessionFiles(sessionDirectory);
+  const localFiles = sharedDirectory
+    ? files.filter((path) => sessionBelongsTo(path, cwd))
+    : files;
+  const findById = (list, wanted) =>
+    list.find((path) => {
+      const id = sessionId(path);
+      return id === wanted || id?.startsWith(wanted);
+    });
+
+  const fork = optionValue(args, "--fork");
+  if (fork) {
+    const asPath = sessionPathArgument(fork, cwd);
+    if (asPath) return asPath;
+    // Pi falls back to every project when no session of this one matches.
+    return (
+      findById(localFiles, fork) ??
+      findById(everySessionFile(sessionDirectory, cwd), fork)
+    );
+  }
   const requested = optionValue(args, "--session");
   if (requested) {
-    if (
-      isAbsolute(requested) ||
-      requested.includes("/") ||
-      requested.includes("\\") ||
-      requested.endsWith(".jsonl")
-    ) {
-      return resolve(cwd, requested);
-    }
-    return sessionFiles(sessionDirectory).find((path) => {
-      const id = sessionId(path);
-      return id === requested || id?.startsWith(requested);
-    });
+    const asPath = sessionPathArgument(requested, cwd);
+    if (asPath) return asPath;
+    return (
+      findById(localFiles, requested) ??
+      findById(everySessionFile(sessionDirectory, cwd), requested)
+    );
   }
   const exactId = optionValue(args, "--session-id");
   if (exactId) {
-    return sessionFiles(sessionDirectory).find(
-      (path) => sessionId(path) === exactId,
-    );
+    // Pi opens only a session of this project under a shared directory;
+    // otherwise it creates a new one, which carries no stored Genome either.
+    return localFiles.find((path) => sessionId(path) === exactId);
   }
   if (hasOption(args, "--continue", "-c")) {
-    return sessionFiles(sessionDirectory)
+    return localFiles
       .map((path) => ({ path, modified: statSync(path).mtimeMs }))
       .sort((left, right) => right.modified - left.modified)[0]?.path;
   }
@@ -1127,6 +1209,7 @@ async function createGenomeExtension({
   cliOverridesTools,
   cliOverridesThinking,
   projectIgnore,
+  resumeWithoutGenome,
   settingsWarnings,
   cwd,
 }): Promise<ExtensionFactory> {
@@ -1263,17 +1346,19 @@ async function createGenomeExtension({
       // A Genome can declare servers this machine cannot start. Saying so is the
       // difference between "half the Genome is missing" and a mystery.
       if (mcpErrors.length > 0) {
-        const message = `MCP servers that did not start: ${mcpErrors.join("; ")}`;
-        if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
-        else console.error(`rsih: ${message}`);
+        reportSessionWarning(
+          ctx,
+          `MCP servers that did not start: ${mcpErrors.join("; ")}`,
+        );
       }
 
       // The Genome's settings could not be written -- a read-only file, say. The
       // run goes on with whatever the file holds, but not silently.
       if (settingsWarnings?.length > 0) {
-        const message = `Could not write the Genome's settings: ${settingsWarnings.join("; ")}`;
-        if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
-        else console.error(`rsih: ${message}`);
+        reportSessionWarning(
+          ctx,
+          `Could not write the Genome's settings: ${settingsWarnings.join("; ")}`,
+        );
       }
 
       // Reported here rather than in the command handler because `ctx.reload()`
@@ -1290,6 +1375,12 @@ async function createGenomeExtension({
             entry.type === "custom" && entry.customType === "rsih.genome",
         )
         .at(-1);
+      const notice = resumeGenomeNotice({
+        resumeWithoutGenome,
+        priorReference: prior?.data?.reference,
+        activeReference: active.reference,
+      });
+      if (notice) reportSessionWarning(ctx, notice);
       if (
         prior?.data?.genome_id !== genome.genome_id ||
         prior?.data?.reference !== active.reference
@@ -1369,45 +1460,137 @@ async function createGenomeExtension({
   };
 }
 
-/**
- * Mirror of Pi's default session directory (`<agentDir>/sessions/--<cwd>--`).
- * RSIH only needs it to find the Genome snapshot stored in a resumed session;
- * Pi still owns session creation and layout.
- *
- * This runs before the Genome's settings are compiled, so it reads the settings
- * file as it stands — which is where the run being resumed put its sessions.
- */
-function piSessionDirectory(cwd, piArgs) {
-  const agentDirectory = getPiAgentDir();
-  const settingsPath = join(agentDirectory, "settings.json");
-  let settingsSessionDir;
-  if (existsSync(settingsPath)) {
-    try {
-      settingsSessionDir = JSON.parse(readFileSync(settingsPath, "utf8"))
-        ?.sessionDir;
-    } catch {
-      // Pi reports malformed settings; fall back to its default layout.
-    }
+function expandHome(path) {
+  const home = homedir();
+  if (path === "~") return home;
+  if (
+    path.startsWith("~/") ||
+    (process.platform === "win32" && path.startsWith("~\\"))
+  ) {
+    return join(home, path.slice(2));
   }
-  const explicit =
-    optionValue(piArgs, "--session-dir") ??
-    process.env.RSIH_CODING_AGENT_SESSION_DIR ??
-    settingsSessionDir;
-  if (explicit) return resolve(cwd, explicit);
-  const encoded = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-  return join(agentDirectory, "sessions", encoded);
+  return path;
+}
+
+function sessionDirSetting(path) {
+  if (!existsSync(path)) return undefined;
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"))?.sessionDir;
+    return typeof value === "string" && value.trim() !== "" ? value : undefined;
+  } catch {
+    // Pi reports malformed settings; the lookup falls back like its own does.
+    return undefined;
+  }
 }
 
 /**
- * Whether argv asks for the version, read the way Pi reads it: anywhere before a
- * `--`, which ends option parsing.
+ * Pi's default session layout, one directory per project.
  */
-function versionRequested(args) {
-  for (const argument of args) {
+function defaultSessionDirectory(cwd) {
+  const encoded = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return join(getPiAgentDir(), "sessions", encoded);
+}
+
+/**
+ * Mirror of Pi's session directory resolution: `--session-dir`, then
+ * `RSIH_CODING_AGENT_SESSION_DIR`, then the `sessionDir` setting (project
+ * overriding global), with `~` expanded and relative paths against the cwd,
+ * then the per-project default. RSIH only needs it to find the Genome snapshot
+ * stored in a resumed session; Pi still owns session creation and layout.
+ *
+ * This runs before the Genome's settings are compiled, so it reads the settings
+ * files as they stand — which is where the run being resumed put its sessions.
+ */
+export function piSessionDirectory(cwd, piArgs) {
+  const explicit =
+    optionValue(piArgs, "--session-dir") ??
+    process.env.RSIH_CODING_AGENT_SESSION_DIR ??
+    sessionDirSetting(join(cwd, PROJECT_CONFIG_DIRECTORY, "settings.json")) ??
+    sessionDirSetting(join(getPiAgentDir(), "settings.json"));
+  if (explicit) return resolve(cwd, expandHome(explicit));
+  return defaultSessionDirectory(cwd);
+}
+
+/**
+ * Options that take a separate value. The token after one of these is never a
+ * flag, so `rsih --name -v` names a session "-v" instead of asking the version.
+ */
+const VALUE_TAKING_OPTIONS = new Set([
+  "--api-key",
+  "--append-system-prompt",
+  "--config",
+  "--cwd",
+  "--env",
+  "--exclude-tools",
+  "--export",
+  "--extension",
+  "--fork",
+  "--genome",
+  "--max-turns",
+  "--mode",
+  "--model",
+  "--models",
+  "--name",
+  "--profile",
+  "--prompt-template",
+  "--provider",
+  "--run-id",
+  "--session",
+  "--session-dir",
+  "--session-id",
+  "--skill",
+  "--system-prompt",
+  "--theme",
+  "--thinking",
+  "--tools",
+  "--tui-mode",
+  "--use-theme",
+  "-e",
+  "-n",
+  "-t",
+  "-xt",
+]);
+
+/**
+ * Whether argv asks for the version, read the way Pi reads it: anywhere before a
+ * `--`, which ends option parsing, and never where a value is expected.
+ */
+export function versionRequested(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
     if (argument === "--") return false;
     if (argument === "--version" || argument === "-v") return true;
+    if (!argument.startsWith("-") || argument.includes("=")) continue;
+    if (VALUE_TAKING_OPTIONS.has(argument)) index += 1;
   }
   return false;
+}
+
+/**
+ * Report a non-fatal session problem where the user can see it: a warning
+ * notification inside the TUI, a line on stderr for print and RPC runs.
+ */
+export function reportSessionWarning(ctx, message) {
+  if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
+  else console.error(`rsih: ${message}`);
+}
+
+/**
+ * The notice for a `--resume` run: the interactive picker's choice is known
+ * only after Pi starts, so a picked session's stored Genome cannot be applied
+ * before this run resolves one. Returns undefined when there is nothing to say
+ * (not a picker run, no stored Genome, or the same Genome is already running).
+ */
+export function resumeGenomeNotice({
+  resumeWithoutGenome,
+  priorReference,
+  activeReference,
+}) {
+  if (!resumeWithoutGenome) return undefined;
+  if (typeof priorReference !== "string" || priorReference === activeReference) {
+    return undefined;
+  }
+  return `This session was created under the "${priorReference}" Genome, but --resume cannot read the picker's choice before startup, so this run uses "${activeReference}" and the session will record it from now on. Pass --genome ${priorReference} to run under the original Genome.`;
 }
 
 export async function runPiCli(argv) {
@@ -1585,6 +1768,11 @@ export async function runPiCli(argv) {
       "-nbt",
     ),
     cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
+    // `--resume` without a Genome cannot read the picked session's snapshot
+    // before startup; the session-start handler reports that once the pick is
+    // known, naming the Genome the session was created under.
+    resumeWithoutGenome:
+      parsed.genome === undefined && hasOption(parsed.piArgs, "--resume", "-r"),
     settingsWarnings: managed.warnings,
     cwd,
   });

@@ -1,14 +1,34 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-function unquote(value) {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
+const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * One `KEY=value` assignment, read the way dotenv files mean it: a leading
+ * `export` is shell spelling of the same thing, a value ends at its closing
+ * quote or at a whitespace-preceded comment, and anything that is not a plain
+ * identifier before the `=` is not an assignment.
+ */
+function parseEnvLine(rawLine) {
+  const line = rawLine.trim();
+  if (!line || line.startsWith("#")) return undefined;
+  const assignment = line.startsWith("export ")
+    ? line.slice("export ".length).trimStart()
+    : line;
+  const separator = assignment.indexOf("=");
+  if (separator < 1) return undefined;
+  const key = assignment.slice(0, separator).trim();
+  if (!KEY_PATTERN.test(key)) return undefined;
+
+  let value = assignment.slice(separator + 1).trim();
+  if (value.startsWith('"') || value.startsWith("'")) {
+    const closing = value.indexOf(value[0], 1);
+    value = closing === -1 ? value.slice(1) : value.slice(1, closing);
+  } else {
+    const comment = value.search(/(^|\s)#/);
+    if (comment !== -1) value = value.slice(0, comment).trimEnd();
   }
-  return value;
+  return { key, value };
 }
 
 export function loadEnvFile(path = ".env", options = {}) {
@@ -17,17 +37,11 @@ export function loadEnvFile(path = ".env", options = {}) {
   const loaded = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-
-    const separator = line.indexOf("=");
-    if (separator < 1) continue;
-
-    const key = line.slice(0, separator).trim();
-    const value = unquote(line.slice(separator + 1).trim());
-    if (!options.override && process.env[key] !== undefined) continue;
-    process.env[key] = value;
-    loaded.push(key);
+    const entry = parseEnvLine(rawLine);
+    if (!entry) continue;
+    if (!options.override && process.env[entry.key] !== undefined) continue;
+    process.env[entry.key] = entry.value;
+    loaded.push(entry.key);
   }
 
   return loaded;

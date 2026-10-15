@@ -179,7 +179,7 @@ stdin-EOF 规则在这里不适用——stdin 就是命令流。
 
 ```bash
 rsih genome list                          # 项目层、用户层、种子层
-rsih genome show <name|path>              # 解析后的 Genome + settings 补丁（只读）
+rsih genome show <name|path>              # 解析后的 Genome + 将写入的 Pi 文件（只读）
 rsih genome validate <name|path>          # 只加载校验，不启动任何东西
 rsih genome install <name|path>           # 拷进 ~/.rsih/genomes
 ```
