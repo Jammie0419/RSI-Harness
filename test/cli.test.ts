@@ -20,6 +20,7 @@ import {
 } from "../src/index.ts";
 import { rsiHeaderLines, RsiEditor } from "../src/tui/rsih-tui.ts";
 import {
+  assertFreshSession,
   genomeAppearanceArgs,
   genomeActiveToolNames,
   genomeFooterStatus,
@@ -105,6 +106,56 @@ test("CLI translates RSIH compatibility flags and preserves Pi flags", () => {
         "json",
       ],
     },
+  );
+});
+
+test("--new refuses every option that can resume a session", () => {
+  // `--new` says "a fresh session instead of resuming", so the options that put
+  // a run back into an existing session are refused rather than silently
+  // winning: a run id (Pi's `--session-id`) reuses an existing session, and
+  // `--fork` derives from one.
+  for (const argv of [
+    ["--new", "-c"],
+    ["--new", "--continue"],
+    ["--new", "-r"],
+    ["--new", "--resume"],
+    ["--new", "--session", "abc"],
+    ["--new", "--session=abc"],
+    ["--new", "--session-id", "abc"],
+    ["--new", "--session-id=abc"],
+    ["--new", "--run-id", "abc"],
+    ["--new", "--fork", "abc"],
+  ]) {
+    assert.throws(
+      () => assertFreshSession(parseCliArgs(argv)),
+      /--new cannot be combined with/,
+      argv.join(" "),
+    );
+  }
+
+  // Alone, or next to options that select no session, it passes.
+  assertFreshSession(parseCliArgs(["--new", "-p", "Say ok."]));
+  assertFreshSession(parseCliArgs(["--new", "--no-session"]));
+  assertFreshSession(parseCliArgs(["--new", "--session-dir", "sessions"]));
+  // After `--` the word is a message, not a flag.
+  assertFreshSession(parseCliArgs(["-p", "--", "--new"]));
+  // Without `--new`, resume options are Pi's business.
+  assertFreshSession(parseCliArgs(["-c"]));
+});
+
+test("--new with a run id stops before Pi starts", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rsih-new-guard-"));
+  const result = runCli(directory, [
+    "--new",
+    "-p",
+    "Say ok.",
+    "--run-id",
+    "guard",
+  ]);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stdout + result.stderr,
+    /rsih: --new cannot be combined with --session-id \(--run-id\)/,
   );
 });
 

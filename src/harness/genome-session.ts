@@ -90,7 +90,15 @@ export function switchedSystemPrompt({ base, options, startup, target }) {
 
   if (!sameAppend) {
     if (startup.appendPrompt && prompt.includes(startup.appendPrompt)) {
+      const before = prompt;
       prompt = spliceBlock(prompt, startup.appendPrompt, target.appendPrompt);
+      if (countOccurrences(before, startup.appendPrompt) > 1) {
+        // Nothing was spliced: the text appears more than once, so there is no
+        // single position that is the previous Genome's section.
+        caveats.push(
+          "the previous Genome's appended instructions appear more than once in the prompt, so they were left in place; restart the session to drop them",
+        );
+      }
     } else {
       if (startup.appendPrompt) {
         caveats.push(
@@ -124,10 +132,25 @@ function joinAppend(value) {
  * until something diffs the two.
  */
 function spliceBlock(text, block, replacement) {
+  // A block that occurs more than once has no single position to splice, and
+  // replacing the first one would rewrite text the Genome never meant to touch:
+  // the caller reports that the switch stayed incomplete instead.
+  if (countOccurrences(text, block) !== 1) return text;
   if (replacement) return text.replace(block, () => replacement);
   if (text.includes(`\n\n${block}`)) return text.replace(`\n\n${block}`, "");
   if (text.includes(`${block}\n\n`)) return text.replace(`${block}\n\n`, "");
   return text.replace(block, "");
+}
+
+function countOccurrences(text, block) {
+  if (!block) return 0;
+  let count = 0;
+  let index = text.indexOf(block);
+  while (index !== -1) {
+    count += 1;
+    index = text.indexOf(block, index + block.length);
+  }
+  return count;
 }
 
 /**

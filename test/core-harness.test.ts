@@ -827,6 +827,32 @@ test("a flat Genome reads a top-level null as inherit", async () => {
   assert.equal(loaded.runtime.thinking_level, "max");
 });
 
+test("a generated tool's output limit counts characters, not bytes", async () => {
+  // The limit is `max_output_chars`, but it used to become execFile's
+  // `maxBuffer`, which counts bytes: this 10,000-character (30,000-byte) output
+  // died with a stdio error under a 5,000-character budget instead of being
+  // truncated to it.
+  const directory = await mkdtemp(join(tmpdir(), "rsih-tool-bytes-"));
+  const genome = createHarnessGenome({
+    genome_id: "harness:tool-bytes",
+    tools: [{ name: "wide", enabled: true }],
+    generated_tools: [
+      {
+        name: "wide",
+        description: "Print multi-byte text.",
+        parameters: { type: "object", properties: {} },
+        container_script: { script: `printf '中%.0s' $(seq 1 10000)` },
+        max_output_chars: 5000,
+      },
+    ],
+  });
+
+  const [tool] = createGeneratedTools({ cwd: directory, genome });
+  const output = await tool.execute({});
+  assert.equal(output.length, 5000 + "\n[truncated]".length);
+  assert.match(output, /\[truncated\]$/);
+});
+
 test("the tool schema gate honours the standard keywords", () => {
   // This gate rejects a tool call that leaves its Genome contract, so every
   // keyword it ignores is narrowing a Genome believes it wrote.

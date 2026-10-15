@@ -177,6 +177,21 @@ export const PI_SETTINGS_OBJECT_KEYS = Object.freeze({
     "baseDelayMs",
     "provider",
   ]),
+  // The rest of the settings that own nested objects, from Pi's own interfaces
+  // (BranchSummarySettings, TerminalSettings, ImageSettings,
+  // ThinkingBudgetsSettings, MarkdownSettings, WarningSettings). Without them a
+  // misspelled nested key was accepted and configured nothing at all.
+  branchSummary: Object.freeze(["reserveTokens", "skipPrompt"]),
+  terminal: Object.freeze([
+    "showImages",
+    "imageWidthCells",
+    "clearOnShrink",
+    "showTerminalProgress",
+  ]),
+  images: Object.freeze(["autoResize", "blockImages"]),
+  thinkingBudgets: Object.freeze(["minimal", "low", "medium", "high"]),
+  markdown: Object.freeze(["codeBlockIndent", "mermaid"]),
+  warnings: Object.freeze(["anthropicExtraUsage"]),
 });
 
 /**

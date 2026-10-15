@@ -260,6 +260,33 @@ function hasOption(args, ...names) {
 }
 
 /**
+ * Options that can put a run back into an existing session. `--new` promises a
+ * fresh one, so these are refused rather than silently honoured: a run id (Pi's
+ * `--session-id`) reuses the session that already has that id, `--fork` derives
+ * from an old one, and the rest select one outright.
+ */
+const SESSION_RESUME_OPTIONS = new Map([
+  ["--continue", "--continue/-c"],
+  ["-c", "--continue/-c"],
+  ["--resume", "--resume/-r"],
+  ["-r", "--resume/-r"],
+  ["--session", "--session"],
+  ["--session-id", "--session-id (--run-id)"],
+  ["--fork", "--fork"],
+]);
+
+export function assertFreshSession({ newSession, piArgs }) {
+  if (!newSession) return;
+  for (const [name, label] of SESSION_RESUME_OPTIONS) {
+    if (hasOption(piArgs, name)) {
+      throw new Error(
+        `--new cannot be combined with ${label}: it starts a fresh session instead of resuming one.`,
+      );
+    }
+  }
+}
+
+/**
  * Theme selection and the theme-discovery switch are CLI-level; the theme
  * *paths* a Genome ships are supplied through `resources_discover` instead.
  */
@@ -1100,6 +1127,7 @@ async function createGenomeExtension({
   cliOverridesTools,
   cliOverridesThinking,
   projectIgnore,
+  settingsWarnings,
   cwd,
 }): Promise<ExtensionFactory> {
   return async (pi) => {
@@ -1236,6 +1264,14 @@ async function createGenomeExtension({
       // difference between "half the Genome is missing" and a mystery.
       if (mcpErrors.length > 0) {
         const message = `MCP servers that did not start: ${mcpErrors.join("; ")}`;
+        if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
+        else console.error(`rsih: ${message}`);
+      }
+
+      // The Genome's settings could not be written -- a read-only file, say. The
+      // run goes on with whatever the file holds, but not silently.
+      if (settingsWarnings?.length > 0) {
+        const message = `Could not write the Genome's settings: ${settingsWarnings.join("; ")}`;
         if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
         else console.error(`rsih: ${message}`);
       }
@@ -1390,12 +1426,7 @@ export async function runPiCli(argv) {
   if (runGenomeCommand(argv)) return;
 
   const parsed = parseCliArgs(argv);
-  if (
-    parsed.newSession &&
-    hasOption(parsed.piArgs, "--continue", "-c", "--resume", "-r", "--session")
-  ) {
-    throw new Error("--new cannot be combined with session resume options.");
-  }
+  assertFreshSession(parsed);
 
   process.chdir(resolve(parsed.cwd));
   // Read the directory back so RSIH and Pi agree on the canonical cwd; on
@@ -1437,7 +1468,7 @@ export async function runPiCli(argv) {
   // Pi exposes no API for settings or keybindings, so the Genome's projection
   // is compiled into the files Pi reads. Only Genome-declared keys are touched.
   const projection = projectGenomeSettings(genome);
-  applyManagedConfiguration({
+  const managed = applyManagedConfiguration({
     agentDirectory: getPiAgentDir(),
     settings: { ...RSIH_BASE_SETTINGS, ...projection.settings },
     keybindings: projection.keybindings,
@@ -1554,6 +1585,7 @@ export async function runPiCli(argv) {
       "-nbt",
     ),
     cliOverridesThinking: hasOption(parsed.piArgs, "--thinking"),
+    settingsWarnings: managed.warnings,
     cwd,
   });
   // Pi's own subcommands dispatch on the first argument, and a Genome's argv is

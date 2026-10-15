@@ -99,6 +99,26 @@ test("prompt text is spliced literally, not as a replacement pattern", () => {
   assert.equal(switched.prompt, assembled({ appendPrompt: "NEW $& BLOCK" }));
 });
 
+test("appended text that appears twice is left in place and reported", () => {
+  // Splicing the first occurrence of a block that appears more than once would
+  // rewrite text the Genome never meant to touch, so nothing is spliced and the
+  // switch says it was not complete.
+  const startup = startupPromptRecord({ appendPrompt: "SHARED RULE" });
+  const base = [PREAMBLE, "SHARED RULE", "SHARED RULE", CONTEXT].join("\n\n");
+  const switched = switchedSystemPrompt({
+    base,
+    options: options({ appendPrompt: "SHARED RULE" }),
+    startup,
+    target: { appendPrompt: "NEW RULE" },
+  });
+
+  assert.equal(switched.prompt, base.trimEnd());
+  assert.equal(
+    switched.caveats.some((caveat) => /more than once/.test(caveat)),
+    true,
+  );
+});
+
 test("swapping a base system prompt replaces it in place", () => {
   const startup = startupPromptRecord({
     systemPrompt: "You only plan.",

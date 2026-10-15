@@ -62,16 +62,31 @@ export function mergeManagedSettings(existing, patch, stamp) {
 /**
  * Compile one Genome-managed JSON file under Pi's agent directory. Returns the
  * resolved contents so `rsih genome show` can render them without writing.
+ *
+ * A write that fails is collected in `warnings` rather than thrown: a read-only
+ * or locked file is not a reason to refuse to start, and the same module already
+ * treats an unreadable file as "leave it alone".
  */
-export function compileManagedFile(path, patch, stamp, { write = true } = {}) {
+export function compileManagedFile(
+  path,
+  patch,
+  stamp,
+  { write = true, warnings } = {},
+) {
   const existing = readJsonFile(path);
   if (existing === undefined) return undefined;
 
   const next = mergeManagedSettings(existing, patch, stamp);
   const serialized = `${JSON.stringify(next, null, 2)}\n`;
   if (write && serialized !== `${JSON.stringify(existing, null, 2)}\n`) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, serialized, "utf8");
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, serialized, "utf8");
+    } catch (error) {
+      warnings?.push(
+        `${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
   return next;
 }
@@ -88,18 +103,20 @@ export function applyManagedConfiguration({
   stamp,
   write = true,
 }) {
+  const warnings = [];
   return {
     settings: compileManagedFile(
       join(agentDirectory, "settings.json"),
       settings ?? {},
       stamp,
-      { write },
+      { write, warnings },
     ),
     keybindings: compileManagedFile(
       join(agentDirectory, "keybindings.json"),
       keybindings ?? {},
       stamp,
-      { write },
+      { write, warnings },
     ),
+    warnings,
   };
 }

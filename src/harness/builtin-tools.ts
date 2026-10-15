@@ -23,26 +23,36 @@ export function generatedToolShell(entrypoint = "/bin/sh") {
  * never reimplements them.
  */
 export function createGeneratedTools({ cwd, genome }) {
-  return (genome.generated_tools ?? []).map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
-    async execute(args, { signal } = {}) {
-      const result = await execFileAsync(
-        generatedToolShell(tool.container_script.entrypoint),
-        ["-c", tool.container_script.script],
-        {
-          cwd,
-          env: {
-            ...process.env,
-            HARNESS_TOOL_ARGS: JSON.stringify(args),
+  return (genome.generated_tools ?? []).map((tool) => {
+    const maxChars = Number(tool.max_output_chars ?? 20000);
+    return {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      async execute(args, { signal } = {}) {
+        const result = await execFileAsync(
+          generatedToolShell(tool.container_script.entrypoint),
+          ["-c", tool.container_script.script],
+          {
+            cwd,
+            env: {
+              ...process.env,
+              HARNESS_TOOL_ARGS: JSON.stringify(args),
+            },
+            timeout: tool.timeout_ms ?? 60000,
+            // `max_output_chars` counts characters and `maxBuffer` counts bytes,
+            // so the byte budget is a runaway guard, generous enough that
+            // multi-byte output reaches the truncation below instead of dying
+            // with a stdio error first.
+            maxBuffer: Math.max(maxChars * 4 + 1024, 4 * 1024 * 1024),
+            signal,
           },
-          timeout: tool.timeout_ms ?? 60000,
-          maxBuffer: tool.max_output_chars ?? 20000,
-          signal,
-        },
-      );
-      return [result.stdout, result.stderr].filter(Boolean).join("\n");
-    },
-  }));
+        );
+        const text = [result.stdout, result.stderr].filter(Boolean).join("\n");
+        return text.length > maxChars
+          ? `${text.slice(0, maxChars)}\n[truncated]`
+          : text;
+      },
+    };
+  });
 }

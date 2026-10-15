@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -144,7 +150,11 @@ for (const contents of [
     for (const path of paths) {
       assert.equal(readFileSync(path, "utf8"), contents);
     }
-    assert.deepEqual(result, { settings: undefined, keybindings: undefined });
+    assert.deepEqual(result, {
+      settings: undefined,
+      keybindings: undefined,
+      warnings: [],
+    });
   });
 }
 
@@ -194,6 +204,41 @@ test("unknown settings keys and keybinding ids are rejected at load time", () =>
     () => createHarnessGenome({ keybindings: { "app.session.tree": [] } }),
     /must be a key or a non-empty array/,
   );
+  // The nested objects Pi defines are checked too, so a misspelled inner key is
+  // rejected instead of quietly configuring nothing.
+  assert.throws(
+    () =>
+      createHarnessGenome({
+        settings: { terminal: { showImage: true } },
+      }),
+    /cannot configure "showImage"/,
+  );
+  assert.throws(
+    () => createHarnessGenome({ settings: { thinkingBudgets: { medium_: 1 } } }),
+    /cannot configure "medium_"/,
+  );
+});
+
+test("a settings file that cannot be written is reported, not fatal", () => {
+  // A read-only or locked file used to throw out of startup, stopping rsih from
+  // running at all, while an unreadable file was silently left alone.
+  const directory = mkdtempSync(join(tmpdir(), "rsih-settings-readonly-"));
+  const settingsPath = join(directory, "settings.json");
+  writeFileSync(settingsPath, `${JSON.stringify({ theme: "dark" })}\n`, "utf8");
+  chmodSync(settingsPath, 0o444);
+  try {
+    const result = applyManagedConfiguration({
+      agentDirectory: directory,
+      settings: { quietStartup: true },
+      keybindings: {},
+      stamp: STAMP,
+    });
+    assert.equal(result.warnings.length, 1);
+    assert.equal(result.settings.quietStartup, true);
+    assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).theme, "dark");
+  } finally {
+    chmodSync(settingsPath, 0o644);
+  }
 });
 
 test("the checked-in paperlab Genome declares only what it configures", () => {
