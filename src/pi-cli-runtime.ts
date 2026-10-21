@@ -1600,7 +1600,7 @@ export async function runPiCli(argv) {
   }
   // `rsih genome ...` is RSIH's own subcommand; everything else, including Pi's
   // install/update/list/config/auth subcommands, falls through to Pi.
-  if (runGenomeCommand(argv)) return;
+  if (await runGenomeCommand(argv)) return;
 
   const parsed = parseCliArgs(argv);
   assertFreshSession(parsed);

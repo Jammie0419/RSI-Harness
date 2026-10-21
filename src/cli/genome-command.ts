@@ -30,6 +30,15 @@ const USAGE = `Usage: rsih genome <command>
   show <name|path>        Print the resolved Genome and the Pi files it would write
   validate <name|path>    Load and validate a Genome without starting a session
   install <name|path>     Copy a Genome into ~/.rsih/genomes. A bare name reinstalls the shipped seed.
+
+Evolution (loaded only when one of these commands runs):
+  scan <base>             Scan new evidence and print the digest
+  plan <base>             Save a validated proposal without installing it
+  apply <proposal>        Install a saved proposal
+  diff <base>             Compare the active Genome with an archive or proposal
+  evolve <base>           Review, compile, validate and install a new revision
+  versions <base>         List archived revisions
+  rollback <base> --to N  Restore an archived revision under the same name
 `;
 
 /** Display names for one directory: bundles are shown with a trailing slash. */
@@ -206,9 +215,15 @@ function installGenome(reference, cwd, io, { homeDirectory = homedir(), packageD
  * Handle `rsih genome ...`. Returns false when argv is not a genome command so
  * the caller falls through to Pi.
  */
-export function runGenomeCommand(
+export async function runGenomeCommand(
   argv,
-  { cwd = process.cwd(), homeDirectory = homedir(), packageDirectory, io = console } = {},
+  {
+    cwd = process.cwd(),
+    homeDirectory = homedir(),
+    agentDirectory,
+    packageDirectory,
+    io = console,
+  } = {},
 ) {
   if (argv[0] !== "genome") return false;
   const [, command, argument] = argv;
@@ -220,6 +235,25 @@ export function runGenomeCommand(
   if (command === "list") {
     listGenomes(cwd, io);
     return true;
+  }
+  if (
+    ["scan", "plan", "apply", "diff", "evolve", "versions", "rollback"].includes(
+      command,
+    )
+  ) {
+    // Dynamic import keeps the evolution subsystem, its reader and its model
+    // code out of a normal `rsih` session.
+    const { runEvolutionCommand } = await import("./evolution-command.ts");
+    return runEvolutionCommand(command, argv.slice(2), {
+      cwd,
+      homeDirectory,
+      agentDirectory,
+      packageDirectory,
+      io,
+    });
+  }
+  if (!["show", "validate", "install"].includes(command)) {
+    throw new Error(`Unknown genome command "${command}".\n\n${USAGE}`);
   }
   if (!argument) {
     throw new Error(`rsih genome ${command} requires a Genome name or path.`);
