@@ -62,10 +62,16 @@ export const EVOLUTION_TO_CORE_COMPONENT: Record<
   resources: { id: "resources", fields: ["resources"] },
 };
 
-/** Every core component id and the genome fields it owns. */
-const CORE_COMPONENT_FIELDS: Record<string, string[]> = Object.fromEntries(
-  Object.values(EVOLUTION_TO_CORE_COMPONENT).map(({ id, fields }) => [id, fields]),
-);
+/**
+ * Every core component id and the genome fields it owns. Several evolution
+ * components map to one core id (`memory` and `policies` share the policies
+ * component file), so same-id entries merge instead of overwriting.
+ */
+const CORE_COMPONENT_FIELDS: Record<string, string[]> = {};
+for (const { id, fields } of Object.values(EVOLUTION_TO_CORE_COMPONENT)) {
+  const merged = CORE_COMPONENT_FIELDS[id] ?? [];
+  CORE_COMPONENT_FIELDS[id] = [...new Set([...merged, ...fields])];
+}
 
 export interface EvolutionCompileMetadata {
   created_at?: string;
@@ -396,6 +402,16 @@ export function compileEvolutionBundle(
       const fields = componentFields.get(mapped.id) ?? new Set<string>();
       for (const field of mapped.fields) fields.add(field);
       componentFields.set(mapped.id, fields);
+    }
+    // `memory` and `policies` share one core component file: rewriting it with
+    // only the changed component's field would drop the sibling one and fail
+    // the reload comparison. Every field mapping to the same core id therefore
+    // joins the write; componentConfig skips fields the genome does not have.
+    for (const [coreId, fields] of componentFields) {
+      for (const { id, fields: shared } of Object.values(EVOLUTION_TO_CORE_COMPONENT)) {
+        if (id !== coreId) continue;
+        for (const field of shared) fields.add(field);
+      }
     }
     if (materializeAll) {
       for (const [id, fields] of Object.entries(CORE_COMPONENT_FIELDS)) {

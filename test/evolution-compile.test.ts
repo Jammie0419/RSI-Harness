@@ -325,3 +325,94 @@ test("paperlab keeps its three file-backed skills when one body changes", (t) =>
     /\(evolved\)/,
   );
 });
+
+/**
+ * harness-rsi is the shipped bundle whose `components/policies.json` carries
+ * both the `policies` and the `memory` field, so a single-component edit must
+ * keep the sibling field in that shared file.
+ */
+function sharedPoliciesFixture(t: test.TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "rsih-evolution-shared-policies-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = join(root, "harness-rsi");
+  cpSync(join(repository, "config", "genomes", "harness-rsi"), base, { recursive: true });
+  const genome = loadHarnessGenomeFile(join(base, "genome.json")).genome;
+  return {
+    root,
+    base,
+    genome,
+    originalPolicies: JSON.parse(JSON.stringify(genome.policies)),
+    originalMemoryContents: genome.memory.snapshot.entries.map(
+      (entry: any) => entry.content,
+    ),
+  };
+}
+
+test("a memory-only edit keeps the sibling policies field in the shared component file", (t) => {
+  const { root, base, genome, originalPolicies, originalMemoryContents } =
+    sharedPoliciesFixture(t);
+  const { result } = compile(root, base, genome, [
+    {
+      op: "entry.upsert",
+      target: { component: "memory", entry: "sibling field survives" },
+      value: { kind: "knowledge", content: "sibling field survives" },
+    },
+  ]);
+
+  const written = JSON.parse(
+    readFileSync(join(result.directory, "components", "policies.json"), "utf8"),
+  );
+  assert.deepEqual(Object.keys(written.config).sort(), ["memory", "policies"]);
+  assert.deepEqual(
+    written.config.policies,
+    originalPolicies,
+    "a memory-only edit must not touch the sibling policies field",
+  );
+  assert.deepEqual(
+    written.config.memory.snapshot.entries.map((entry: any) => entry.content),
+    [...originalMemoryContents, "sibling field survives"],
+  );
+
+  const loaded = loadHarnessGenomeFile(join(result.directory, "genome.json")).genome;
+  assert.deepEqual(loaded.policies, originalPolicies);
+  assert.deepEqual(
+    loaded.memory.snapshot.entries.map((entry: any) => entry.content),
+    [...originalMemoryContents, "sibling field survives"],
+  );
+});
+
+test("a policies-only edit keeps the sibling memory field in the shared component file", (t) => {
+  const { root, base, genome, originalMemoryContents } = sharedPoliciesFixture(t);
+  const nextToolPolicy = {
+    ...genome.policies.tool,
+    blocked_tools: [
+      ...(genome.policies.tool?.blocked_tools ?? []),
+      "evolved_probe_cli",
+    ],
+  };
+  const { result } = compile(root, base, genome, [
+    {
+      op: "field.set",
+      target: { component: "policies", field: "tool" },
+      value: nextToolPolicy,
+    },
+  ]);
+
+  const written = JSON.parse(
+    readFileSync(join(result.directory, "components", "policies.json"), "utf8"),
+  );
+  assert.deepEqual(Object.keys(written.config).sort(), ["memory", "policies"]);
+  assert.deepEqual(
+    written.config.memory.snapshot.entries.map((entry: any) => entry.content),
+    originalMemoryContents,
+    "a policies-only edit must not touch the sibling memory field",
+  );
+  assert.ok(written.config.policies.tool.blocked_tools.includes("evolved_probe_cli"));
+
+  const loaded = loadHarnessGenomeFile(join(result.directory, "genome.json")).genome;
+  assert.deepEqual(
+    loaded.memory.snapshot.entries.map((entry: any) => entry.content),
+    originalMemoryContents,
+  );
+  assert.ok(loaded.policies.tool.blocked_tools.includes("evolved_probe_cli"));
+});
