@@ -502,7 +502,7 @@ export default function harnessRsi(pi: ExtensionAPI) {
   pi.registerTool({
     name: "scan_workspaces",
     label: "Scan workspaces",
-    description: `Group session history by working directory across the session stores the user has: ${SESSION_SOURCES.map((source) => `${source.id} (${source.label})`).join(", ")}. Returns raw facts per workspace -- path, which sources contributed, session count, bytes, date span, and excerpts of the user's own opening prompts. Ranking and descriptions are yours to write. Reads are head-bounded and no transcript body is returned. Pass \`paths\` after the user has chosen to get the full transcript file list for those workspaces.`,
+    description: `Group session history by working directory across the session stores the user has: ${SESSION_SOURCES.map((source) => `${source.id} (${source.label})`).join(", ")}. Returns raw facts per workspace -- path, which sources contributed, session count, bytes, date span, and excerpts of the user's own opening prompts. Ranking and descriptions are yours to write. Transcript reads are bounded -- file heads for JSONL stores, capped queries for SQLite stores -- and no transcript body is returned. Pass \`paths\` after the user has chosen to get the full transcript file list for those workspaces.`,
     parameters: ScanParams,
     executionMode: "sequential",
     async execute(_toolCallId, params) {

@@ -129,10 +129,14 @@ RSIH 是新的，所以大多数人第一次跑这个 Genome 时自己的库是�
 | `claude` | `~/.claude/projects/<编码后的 cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` 和 `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
 | `copilot` | `<COPILOT_HOME>/session-state/<会话 ID>/events.jsonl` | Copilot CLI |
+| `zcode` | `<ZCODE_HOME>/cli/db/db.sqlite`（全部会话的单一 SQLite 库，默认 `~/.zcode`） | ZCode session store |
 
 默认只读 `rsih`，其余由用户在第 2 步显式勾选；`roots` 参数只读取用户指定的 Pi 格式
 目录。Codex 默认使用 `~/.codex`，可在启动前通过 `CODEX_HOME` 指定其他位置。
-Copilot CLI 默认使用 `~/.copilot`，可通过 `COPILOT_HOME` 指定。同一个 cwd 在多个
+Copilot CLI 默认使用 `~/.copilot`，可通过 `COPILOT_HOME` 指定。ZCode 同样是
+opt-in：它的存储是**单个活跃 SQLite 库**，以有界只读查询访问、绝不写入；
+`ZCODE_HOME` 是 rsih 侧的覆盖开关（ZCode 自身没有 home 环境变量），默认
+`~/.zcode`。同一个 cwd 在多个
 source 都有历史时会归并成一个工作区，并标出各自的贡献
 （本机实测 `/Users/lx` 三个 source 都有）。
 
@@ -167,10 +171,26 @@ GitHub 的[配置目录文档](https://docs.github.com/en/copilot/reference/copi
 说明存储位置，[SDK 事件参考](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events)
 说明事件字段，但 CLI 磁盘格式尚无面向第三方解析器的稳定性承诺。
 
+**ZCode 使用单一 SQLite 库。** 会话、消息与内容块都在 `db.sqlite` 里：
+`session.directory` 给出工作目录，`task_type='subagent_child'`、有 `parent_id`
+或已删除（`time_deleted`）的会话整条跳过并计入 `filtered`。用户消息的
+`message.data` 带 `semantics.origin`：ZCode 自己定义了五个来源（`real_user`、
+`agent_runtime`、`system`、`migration`、`import`），只有 `real_user` 是用户真实
+输入；`synthetic`、隐藏可见性、以及压缩摘要（`kind:'compact_summary'` 或
+`compaction` 内容块）即使标成 `real_user` 也排除——与 ZCode 自己的 realUserInput
+判定一致。五个来源之外的取值排除并记录 `unknown_user_source`。请求文本在
+`part` 表 `type:'text'` 块的 `text` 字段。`time_created`/`time_updated` 是
+epoch 毫秒。读取是有界 SQL：schema 先探测，无法识别的库整源计
+`unsupported_format`，打不开计 `unreadable`——绝不把不认识的结构当成空历史。
+schema 随 ZCode 版本迁移演进，不是公开 API；-rollout 转储、`input_history`
+和使用量统计都不读。`record.path` 是合成键 `<库路径>#<会话 id>`，
+供 focused 扫描后的深挖查询使用（配方见 session-forensics 技能）。
+
 **读取是有界的。** Pi / Claude 每个文件最多读前 64 KiB；Codex / Copilot 最多读前 2 MiB，
-以免长事件占满读取预算。各来源每个会话最多保留 40 条文本请求，每条保留
+以免长事件占满读取预算；ZCode 没有字节窗口，同样的上限在 SQL 内施加。
+各来源每个会话最多保留 40 条文本请求，每条保留
 600 个字符。`prompts_complete` 只表示可归属请求的采样覆盖范围：因字节上限、
-消息数量上限或 Copilot 工作区归属不明而未读完时为 `false`。读取失败的文件
+消息数量上限或 Copilot/ZCode 工作区归属不明而未读完时为 `false`。读取失败的文件
 不会产生记录，只计入 `unreadable`。文本截断、损坏记录、缺少显式用户事件
 单独列入 `sampling_issues`；这些问题本身不改变覆盖标记：
 
@@ -183,7 +203,7 @@ GitHub 的[配置目录文档](https://docs.github.com/en/copilot/reference/copi
 | `no_user_events` | Codex 有模型可见的 user 消息，但窗口内没有显式用户事件 |
 | `workspace_changed` | Copilot 会话的 cwd 在用户请求后发生变化，后续请求不归入之前的工作区 |
 | `unattributed_prompts` | Copilot 在出现可用 cwd 前已有用户请求，未给这些请求猜测工作区 |
-| `unknown_user_source` | Copilot 消息带有无法确认的人类输入来源，已排除并标记采样不完整 |
+| `unknown_user_source` | Copilot/ZCode 消息带有无法确认的人类输入来源，已排除并标记采样不完整 |
 | `invalid_cwd` | Copilot 的 cwd 更新不是可验证的绝对路径；后续请求不归入原工作区 |
 
 损坏行不会使整个扫描崩溃；到达窗口边界时不解析被切断的尾行。`prompts_complete`
@@ -198,11 +218,13 @@ GitHub 的[配置目录文档](https://docs.github.com/en/copilot/reference/copi
 `session_files_skipped` 和每个来源的 `files_skipped` 均按原因返回计数：
 `filtered` 是主动排除的非用户线程，`unreadable` 是读取失败，`missing_metadata`
 是缺少工作区元数据，`unsupported_format` 是尚不支持的 Codex 压缩 `.jsonl.zst`
-文件。主动过滤不算读取失败。Codex 只支持普通 JSONL rollout，不读
-`history.jsonl`；Copilot 只读每个会话的 `events.jsonl`，不扫描数据库。
+文件或 schema 无法识别的 ZCode 库。主动过滤不算读取失败。Codex 只支持普通
+JSONL rollout，不读 `history.jsonl`；Copilot 只读每个会话的 `events.jsonl`，
+不扫描其跨会话数据库；唯一会被打开的数据库是 ZCode 自己的会话库（只读）。
 日志记录形状与测试来源见
-[`Codex fixtures`](../../test/fixtures/codex/README.md) 和
-[`Copilot fixtures`](../../test/fixtures/copilot/README.md)。
+[`Codex fixtures`](../../test/fixtures/codex/README.md)、
+[`Copilot fixtures`](../../test/fixtures/copilot/README.md) 和
+[`ZCode fixtures`](../../test/fixtures/zcode/README.md)。
 
 加一个 harness 仍然是往 `SESSION_SOURCES` 加一条记录和一个 reader，工作区聚合
 不需要认识各来源的格式。

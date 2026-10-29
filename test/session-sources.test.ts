@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   DEFAULT_SOURCE_IDS,
@@ -568,4 +569,379 @@ test("Copilot CLI reads past 64 KiB and separates truncated text from coverage",
   assert.equal(record.prompts[0].length, 603);
   assert.equal(record.promptsComplete, true);
   assert.deepEqual(record.samplingIssues, ["prompt_truncated"]);
+});
+
+/* ------------------------------------------------ ZCode db fixtures */
+
+const zcodeBase = new Date("2026-09-01T12:00:00.000Z").getTime();
+const zcodeWorkspace = String.raw`E:\proj\研究 project`;
+
+interface ZcodeSessionSpec {
+  id: string;
+  directory: string;
+  taskType?: string;
+  parentId?: string | null;
+  deleted?: boolean;
+  created: number;
+  updated: number;
+  /** One entry per real-user message; an array entry is several text parts. */
+  prompts?: Array<string | string[]>;
+  /** Extra user-role rows: [semantics.origin, semantics.kind]. */
+  machine?: Array<[string | null, string]>;
+  /** real_user messages carrying a wrapper marker, which must not be evidence. */
+  wrapped?: Array<"synthetic" | "compact_summary" | "hidden">;
+  /** Write one corrupt message.data row. */
+  malformed?: boolean;
+}
+
+/** A reduced but contract-faithful store; see test/fixtures/zcode/README.md. */
+function buildZcodeStore(root: string, partial = false) {
+  const dir = join(root, "cli", "db");
+  mkdirSync(dir, { recursive: true });
+  const db = new DatabaseSync(join(dir, "db.sqlite"));
+  db.exec("PRAGMA journal_mode = wal");
+  db.exec(`
+    CREATE TABLE session (
+      id text primary key,
+      directory text not null,
+      task_type text not null default 'interactive',
+      parent_id text,
+      time_created integer not null,
+      time_updated integer not null,
+      time_deleted integer
+    )`);
+  if (!partial) {
+    db.exec(`
+      CREATE TABLE message (
+        id text primary key,
+        session_id text not null,
+        data text not null,
+        sequence integer,
+        time_created integer not null
+      );
+      CREATE TABLE part (
+        id text primary key,
+        message_id text not null,
+        session_id text not null,
+        data text not null,
+        sequence integer,
+        time_created integer not null
+      )`);
+  }
+  return db;
+}
+
+function buildZcodeSession(db: DatabaseSync, spec: ZcodeSessionSpec) {
+  db.prepare(
+    "INSERT INTO session (id, directory, task_type, parent_id, time_created, time_updated, time_deleted) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    spec.id, spec.directory, spec.taskType ?? "interactive", spec.parentId ?? null,
+    spec.created, spec.updated, spec.deleted ? spec.updated : null,
+  );
+  let sequence = 0;
+  const message = db.prepare(
+    "INSERT INTO message (id, session_id, data, sequence, time_created) VALUES (?, ?, ?, ?, ?)",
+  );
+  const part = db.prepare(
+    "INSERT INTO part (id, message_id, session_id, data, sequence, time_created) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  const insert = (id: string, data: unknown, texts: string[]) => {
+    const at = spec.created + sequence;
+    message.run(id, spec.id, typeof data === "string" ? data : JSON.stringify(data), sequence++, at);
+    texts.forEach((text, index) =>
+      part.run(`${id}#${index}`, id, spec.id, JSON.stringify({ type: "text", text }), index, at));
+  };
+  (spec.prompts ?? []).forEach((entry, index) => {
+    insert(
+      `${spec.id}-m${index}`,
+      { role: "user", semantics: { origin: "real_user", kind: "user_prompt" } },
+      Array.isArray(entry) ? entry : [entry],
+    );
+  });
+  (spec.machine ?? []).forEach(([origin, kind], index) => {
+    insert(`${spec.id}-r${index}`, { role: "user", semantics: { origin, kind } }, [`machine ${origin ?? "(none)"}`]);
+  });
+  (spec.wrapped ?? []).forEach((marker, index) => {
+    const semantics: Record<string, any> = {
+      origin: "real_user", kind: "user_prompt",
+      uiVisibility: "visible", providerVisibility: "visible", transcriptVisibility: "visible",
+    };
+    const data: Record<string, any> = { role: "user", semantics };
+    if (marker === "synthetic") data.synthetic = true;
+    if (marker === "compact_summary") semantics.kind = "compact_summary";
+    if (marker === "hidden") semantics.transcriptVisibility = "hidden";
+    insert(`${spec.id}-w${index}`, data, [`wrapped ${marker}`]);
+  });
+  if (spec.malformed) insert(`${spec.id}-bad`, "{broken", []);
+}
+
+function useZcodeHome(t, root: string | undefined) {
+  const previous = process.env.ZCODE_HOME;
+  if (root === undefined) delete process.env.ZCODE_HOME;
+  else process.env.ZCODE_HOME = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ZCODE_HOME;
+    else process.env.ZCODE_HOME = previous;
+  });
+}
+
+function zcodeRecords(root: string) {
+  const source = SESSION_SOURCES.find((source) => source.id === "zcode");
+  assert.ok(source, "ZCode must be a supported, opt-in source");
+  return source.read([join(root, "cli", "db", "db.sqlite")]);
+}
+
+/* --------------------------------------------------------- ZCode tests */
+
+test("ZCode is opt-in and points at the single session store", (t) => {
+  const source = SESSION_SOURCES.find((source) => source.id === "zcode");
+  assert.ok(source, "ZCode must be a supported, opt-in source");
+  useZcodeHome(t, undefined);
+  // Inspect locations only; this test must not read the user's real history.
+  assert.deepEqual(source.roots(), [join(homedir(), ".zcode", "cli", "db", "db.sqlite")]);
+  assert.deepEqual(DEFAULT_SOURCE_IDS, ["rsih"]);
+  assert.deepEqual(readSessions([]).records, []);
+  const root = fixture(t);
+  useZcodeHome(t, root);
+  assert.deepEqual(source.roots(), [join(root, "cli", "db", "db.sqlite")]);
+  const scan = readSessions(["zcode"]);
+  assert.equal(scan.sources[0].available, false);
+  assert.deepEqual(scan.records, []);
+});
+
+test("ZCode maps the directory and real-user text parts onto a session", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "session_one", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase + 1000,
+    prompts: ["first request", ["multi", "part"]],
+  });
+  const [record] = zcodeRecords(root);
+  assert.equal(record.source, "zcode");
+  assert.equal(record.cwd, zcodeWorkspace);
+  assert.equal(record.path, `${join(root, "cli", "db", "db.sqlite")}#session_one`);
+  assert.deepEqual(record.prompts, ["first request", "multi part"]);
+  assert.equal(record.created.getTime(), zcodeBase);
+  assert.equal(record.modified.getTime(), zcodeBase + 1000);
+  assert.ok(record.bytes > 0);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, []);
+  db.close();
+});
+
+test("ZCode keeps only real_user turns, never the agent_runtime reminders", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["human"],
+    machine: [
+      ["agent_runtime", "todo_reminder"], ["agent_runtime", "background_notification"],
+      ["agent_runtime", "system_reminder"], ["agent_runtime", "subagent_notification"],
+    ],
+  });
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["human"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, []);
+  db.close();
+});
+
+test("ZCode skips subagent and deleted sessions as filtered", (t) => {
+  const root = fixture(t);
+  useZcodeHome(t, root);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "child", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    taskType: "subagent_child", prompts: ["delegated"],
+  });
+  buildZcodeSession(db, {
+    id: "nested", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    parentId: "session_parent", prompts: ["delegated"],
+  });
+  buildZcodeSession(db, {
+    id: "gone", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    deleted: true, prompts: ["deleted"],
+  });
+  buildZcodeSession(db, {
+    id: "kept", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase, prompts: ["kept"],
+  });
+  const scan = readSessions(["zcode"]);
+  assert.equal(scan.records.length, 1);
+  assert.equal(scan.records[0].path, `${join(root, "cli", "db", "db.sqlite")}#kept`);
+  assert.deepEqual(scan.skippedFiles, {
+    filtered: 3, unreadable: 0, missing_metadata: 0, unsupported_format: 0,
+  });
+  db.close();
+});
+
+test("ZCode distinguishes exactly 40 prompts from a 41st real_user message", (t) => {
+  const root = fixture(t);
+  for (const count of [39, 40, 41]) {
+    const store = join(root, String(count));
+    const db = buildZcodeStore(store);
+    buildZcodeSession(db, {
+      id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+      prompts: Array.from({ length: count }, (_, i) => `request ${i}`),
+    });
+    const [record] = zcodeRecords(store);
+    assert.equal(record.prompts.length, Math.min(count, 40), `count=${count}`);
+    assert.equal(record.promptsComplete, count <= 40, `count=${count}`);
+    assert.deepEqual(record.samplingIssues, count <= 40 ? [] : ["prompt_limit"], `count=${count}`);
+    db.close();
+  }
+});
+
+test("ZCode reports unrecognized user-role origins instead of trusting them", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["human"],
+    machine: [["mystery_origin", "user_prompt"], [null, "user_prompt"]],
+  });
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["human"]);
+  assert.equal(record.promptsComplete, false);
+  assert.deepEqual(record.samplingIssues, ["unknown_user_source"]);
+  db.close();
+});
+
+test("ZCode treats every origin it defines as known, not as an issue", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["human"],
+    machine: [
+      ["agent_runtime", "todo_reminder"], ["system", "timeline_event"],
+      ["migration", "shared_context"], ["import", "shared_context"],
+    ],
+  });
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["human"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, []);
+  db.close();
+});
+
+test("ZCode drops synthetic and compact-summary wrappers even when marked real_user", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["real"],
+    wrapped: ["synthetic", "compact_summary", "hidden"],
+  });
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["real"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, []);
+  db.close();
+});
+
+test("ZCode falls back to timestamps when sequence is NULL", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["first", "second", "third"],
+  });
+  // Older stores may predate the sequence autofill.
+  db.exec("UPDATE message SET sequence = NULL");
+  db.exec("UPDATE part SET sequence = NULL");
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["first", "second", "third"]);
+  assert.equal(record.promptsComplete, true);
+  db.close();
+});
+
+test("ZCode reports malformed rows without losing the readable prompts", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["before", "after"], malformed: true,
+  });
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["before", "after"]);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, ["malformed_json"]);
+  db.close();
+});
+
+test("ZCode text truncation alone preserves coverage", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "s", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["x".repeat(601)],
+  });
+  const [record] = zcodeRecords(root);
+  assert.equal(record.prompts.length, 1);
+  assert.equal(record.prompts[0].length, 603);
+  assert.equal(record.promptsComplete, true);
+  assert.deepEqual(record.samplingIssues, ["prompt_truncated"]);
+  db.close();
+});
+
+test("ZCode counts sessions without a usable directory as missing metadata", (t) => {
+  const root = fixture(t);
+  useZcodeHome(t, root);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "blank", directory: "   ", created: zcodeBase, updated: zcodeBase, prompts: ["nowhere"],
+  });
+  db.close();
+  const scan = readSessions(["zcode"]);
+  assert.deepEqual(scan.records, []);
+  assert.equal(scan.skippedFiles.missing_metadata, 1);
+});
+
+test("ZCode reports stores it cannot recognise or open, once each", (t) => {
+  const root = fixture(t);
+  const partial = buildZcodeStore(join(root, "partial"), true);
+  partial.close();
+  const junk = join(root, "junk", "cli", "db");
+  mkdirSync(junk, { recursive: true });
+  writeFileSync(join(junk, "db.sqlite"), "this is not a database");
+  useZcodeHome(t, join(root, "partial"));
+  assert.deepEqual(readSessions(["zcode"]).skippedFiles, {
+    filtered: 0, unreadable: 0, missing_metadata: 0, unsupported_format: 1,
+  });
+  useZcodeHome(t, join(root, "junk"));
+  const scan = readSessions(["zcode"]);
+  assert.deepEqual(scan.records, []);
+  assert.equal(scan.skippedFiles.unreadable, 1);
+});
+
+test("ZCode reads rows still sitting in the WAL of a live store", (t) => {
+  const root = fixture(t);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, {
+    id: "live", directory: zcodeWorkspace, created: zcodeBase, updated: zcodeBase,
+    prompts: ["live request"],
+  });
+  // No close: the writer connection stays open, exactly like a running ZCode.
+  const [record] = zcodeRecords(root);
+  assert.deepEqual(record.prompts, ["live request"]);
+  assert.equal(record.promptsComplete, true);
+  db.close();
+});
+
+test("ZCode sessions group per workspace through readSessions", (t) => {
+  const root = fixture(t);
+  useZcodeHome(t, root);
+  const db = buildZcodeStore(root);
+  buildZcodeSession(db, { id: "one", directory: "E:\\proj\\one", created: zcodeBase, updated: zcodeBase, prompts: ["one"] });
+  buildZcodeSession(db, { id: "two", directory: "E:\\proj\\two", created: zcodeBase, updated: zcodeBase + 1, prompts: ["two"] });
+  buildZcodeSession(db, { id: "again", directory: "E:\\proj\\one", created: zcodeBase, updated: zcodeBase + 2, prompts: ["one more"] });
+  db.close();
+  const scan = readSessions(["zcode"]);
+  assert.equal(scan.sources[0].available, true);
+  assert.equal(scan.records.length, 3);
+  assert.deepEqual(
+    scan.records.map((record) => record.cwd).sort(),
+    ["E:\\proj\\one", "E:\\proj\\one", "E:\\proj\\two"],
+  );
 });

@@ -2,7 +2,7 @@
  * Session readers for the harnesses a user actually arrives with.
  *
  * Almost nobody has RSIH history on the day they first run this Genome, so the
- * evidence has to come from wherever they have been working. Five stores are
+ * evidence has to come from wherever they have been working. Six stores are
  * supported today:
  *
  *   rsih    <agentDir>/sessions/--<encoded cwd>--/<ts>_<uuid>.jsonl
@@ -10,10 +10,13 @@
  *   claude  ~/.claude/projects/<encoded cwd>/<uuid>.jsonl
  *   codex   $CODEX_HOME/sessions/YYYY/MM/DD/*.jsonl (+ archived_sessions)
  *   copilot $COPILOT_HOME/session-state/<session id>/events.jsonl
+ *   zcode   $ZCODE_HOME/cli/db/db.sqlite -- one SQLite store, every session
  *
  * RSIH and Pi share a schema. Claude Code's differs enough to need its own
  * reader but is shaped the same way: a JSONL file per session under a directory
- * named after the working directory.
+ * named after the working directory. ZCode instead keeps one live SQLite
+ * database, so its reader runs bounded read-only queries rather than sampling
+ * file heads.
  *
  * Adding another harness means adding one entry to `SESSION_SOURCES` with its
  * own reader; nothing else in the scan path is format-aware.
@@ -29,16 +32,22 @@
 
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   fstatSync,
+  mkdtempSync,
   openSync,
   readdirSync,
   readSync,
   realpathSync,
+  rmSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
+// Shipped unflagged since Node 22.13, safely inside this package's engines
+// floor; a runtime without it fails the schema probe into `unreadable`.
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Head window for a transcript we have to parse ourselves. */
@@ -119,6 +128,15 @@ function readContext(): ReadContext {
 function isDirectory(path: string) {
   try {
     return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Roots are directories for every store except ZCode's single db file. */
+function isFile(path: string) {
+  try {
+    return statSync(path).isFile();
   } catch {
     return false;
   }
@@ -506,12 +524,293 @@ function readCopilotTranscript(path: string, source: string): TranscriptResult {
   };
 }
 
+/* --------------------------------------------------- ZCode session store */
+
+// ZCode keeps every session -- interactive and subagent alike -- in one live
+// SQLite store instead of per-session files. The reader is therefore
+// query-shaped: bounded statements replace the head-byte windows above, and a
+// schema probe gates the whole source so an unrecognised layout (the schema is
+// ZCode's private, migration-driven surface) is reported, never guessed at.
+// The record-level contract lives in test/fixtures/zcode/README.md.
+const ZCODE_DB_NAME = "db.sqlite";
+
+const ZCODE_SESSIONS_SQL = `
+  SELECT id, directory, time_created, time_updated, task_type, parent_id, time_deleted
+  FROM session
+  ORDER BY time_updated DESC`;
+
+// ZCode's own semantics enum, read from its bundled app code, has five
+// origins: real_user, agent_runtime, system, migration, import. Only real_user
+// is typed input; the rest are known non-user content, so they are excluded
+// without being reported as unknown. Its realUserInput projection also drops
+// wrapper messages that carry synthetic/hidden markers or a compact summary
+// even when the origin says real_user -- the subquery mirrors that rule.
+// json_valid comes first because the json_* functions throw on malformed JSON.
+// The 41st distinct real-user message proves the 40-prompt cap truncated
+// coverage; the outer join then collects every text part of exactly those
+// messages. Both sorts share the message key, so a change of mid starts the
+// next prompt.
+const ZCODE_PROMPTS_SQL = `
+  SELECT m.id AS mid, p.data AS pdata
+  FROM message m JOIN part p ON p.message_id = m.id
+  WHERE m.id IN (
+    SELECT id FROM message
+    WHERE session_id = ?
+      AND json_valid(data)
+      AND json_extract(data, '$.role') = 'user'
+      AND json_extract(data, '$.semantics.origin') = 'real_user'
+      AND coalesce(json_extract(data, '$.synthetic'), 0) = 0
+      AND coalesce(json_extract(data, '$.semantics.kind'), '') != 'compact_summary'
+      AND json_extract(data, '$.summary') IS NULL
+      AND coalesce(json_extract(data, '$.semantics.uiVisibility'), 'visible') != 'hidden'
+      AND coalesce(json_extract(data, '$.semantics.transcriptVisibility'), 'visible') != 'hidden'
+      AND coalesce(json_extract(data, '$.visibility'), 'visible') != 'hidden'
+    ORDER BY coalesce(sequence, time_created), id
+    LIMIT 41
+  )
+  AND json_valid(p.data)
+  AND json_extract(p.data, '$.type') = 'text'
+  ORDER BY coalesce(m.sequence, m.time_created), m.id, coalesce(p.sequence, p.time_created)`;
+
+// A census, not a filter: an origin outside the known pair is reported as
+// unknown_user_source instead of being silently dropped or trusted.
+const ZCODE_ORIGINS_SQL = `
+  SELECT DISTINCT json_extract(data, '$.semantics.origin') AS origin
+  FROM message
+  WHERE session_id = ? AND json_valid(data)
+    AND json_extract(data, '$.role') = 'user'`;
+
+// Rows the json_* guards above skip are coverage damage, so count them.
+const ZCODE_MALFORMED_SQL = `
+  SELECT (SELECT COUNT(*) FROM message WHERE session_id = ? AND NOT json_valid(data)) +
+         (SELECT COUNT(*) FROM part    WHERE session_id = ? AND NOT json_valid(data)) AS n`;
+
+// A stand-in for transcript size, used only for a workspace's sense of scale.
+const ZCODE_BYTES_SQL = `
+  SELECT (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM message WHERE session_id = ?) +
+         (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM part    WHERE session_id = ?) AS bytes`;
+
+// Every origin ZCode itself defines is known; only a new one gets reported.
+const ZCODE_KNOWN_ORIGINS = new Set([
+  "real_user",
+  "agent_runtime",
+  "system",
+  "migration",
+  "import",
+]);
+
+// ZCode has no home override of its own; ZCODE_HOME is an rsih-side knob so
+// tests and unusual installs can point at another store.
+function zcodeHome() {
+  return process.env.ZCODE_HOME?.trim() || join(homedir(), ".zcode");
+}
+
+interface ZcodeDatabase {
+  db: DatabaseSync;
+  dispose: () => void;
+}
+
+// The store is written while ZCode runs, so it is only ever opened read-only
+// (query_only is a second belt for runtimes that ignore the open option). WAL
+// lets this reader work beside the writer; if the platform still refuses --
+// missing -shm permission, an exotic lock state -- retry against a temp copy
+// of db.sqlite with its -wal/-shm siblings. Nothing here ever writes.
+function openZcodeDatabase(path: string): ZcodeDatabase | undefined {
+  try {
+    const db = openReadOnlyZcode(path);
+    return { db, dispose: () => db.close() };
+  } catch {
+    // Fall through to the copy below.
+  }
+  const dir = mkdtempSync(join(tmpdir(), "rsih-zcode-"));
+  try {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const source = `${path}${suffix}`;
+      if (existsSync(source)) copyFileSync(source, join(dir, `${ZCODE_DB_NAME}${suffix}`));
+    }
+    const db = openReadOnlyZcode(join(dir, ZCODE_DB_NAME));
+    return {
+      db,
+      dispose: () => {
+        db.close();
+        discardTempZcode(dir);
+      },
+    };
+  } catch {
+    discardTempZcode(dir);
+    return undefined;
+  }
+}
+
+// Windows can briefly hold a freshly copied temp file (antivirus, indexer);
+// retries usually clear it, and a leftover temp dir is harmless next to a
+// broken store -- cleanup must never mask the real failure.
+function discardTempZcode(dir: string) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  } catch {
+    // A leftover temp directory is acceptable.
+  }
+}
+
+function openReadOnlyZcode(path: string): DatabaseSync {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 2000");
+    db.exec("PRAGMA query_only = 1");
+    // SQLite defers reading the file until the first statement, so force the
+    // page-1 header read here: a non-SQLite file is rejected as unreadable now
+    // instead of resurfacing later as an unknown schema.
+    db.prepare("PRAGMA schema_version").get();
+    return db;
+  } catch (error) {
+    // A constructed-but-rejected connection still holds the file open.
+    db.close();
+    throw error;
+  }
+}
+
+// PRAGMA table_info on an absent table returns no rows, which the column
+// check reads the same as a missing table.
+const ZCODE_REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  session: ["id", "directory", "time_created", "time_updated", "task_type", "parent_id", "time_deleted"],
+  message: ["id", "session_id", "data", "sequence"],
+  part: ["id", "message_id", "session_id", "data", "sequence"],
+};
+
+function zcodeSchemaReady(db: DatabaseSync): boolean {
+  for (const [table, columns] of Object.entries(ZCODE_REQUIRED_COLUMNS)) {
+    let rows: Record<string, any>[];
+    try {
+      rows = db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, any>[];
+    } catch {
+      return false;
+    }
+    const present = new Set(rows.map((row) => row.name));
+    for (const column of columns) {
+      if (!present.has(column)) return false;
+    }
+  }
+  return true;
+}
+
+function zcodeDate(value: unknown): Date | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? new Date(value) : undefined;
+}
+
+interface ZcodeStatements {
+  prompts: StatementSync;
+  origins: StatementSync;
+  malformed: StatementSync;
+  bytes: StatementSync;
+}
+
+function zcodeSessionRecord(
+  statements: ZcodeStatements,
+  dbPath: string,
+  source: string,
+  session: Record<string, any>,
+  storeFallback: { created: Date; modified: Date },
+): SessionRecord | SkipReason {
+  // Subagent and deleted sessions are deliberately excluded, not unreadable
+  // history -- the call codex makes on its own machine-generated threads.
+  if (
+    session.task_type !== "interactive" ||
+    session.parent_id !== null ||
+    session.time_deleted !== null
+  ) {
+    return "filtered";
+  }
+  const cwd = typeof session.directory === "string" ? session.directory.trim() : "";
+  if (!cwd) return "missing_metadata";
+
+  const issues = new Set<SamplingIssue>();
+  const prompts: string[] = [];
+  let current: { id: unknown; text: string[] } | undefined;
+  for (const row of statements.prompts.all(session.id) as Record<string, any>[]) {
+    if (current && current.id !== row.mid) {
+      push(prompts, current.text.join(" "), issues);
+      current = undefined;
+    }
+    current ??= { id: row.mid, text: [] };
+    // json_valid guarded the row in SQL; text can still be absent on an
+    // exotic part, and push() drops an empty join anyway.
+    current.text.push(String(JSON.parse(row.pdata)?.text ?? ""));
+  }
+  if (current) push(prompts, current.text.join(" "), issues);
+
+  for (const row of statements.origins.all(session.id) as Record<string, any>[]) {
+    if (!ZCODE_KNOWN_ORIGINS.has(row.origin)) issues.add("unknown_user_source");
+  }
+  const [malformed] = statements.malformed.all(session.id, session.id) as Record<string, any>[];
+  if (Number(malformed?.n) > 0) issues.add("malformed_json");
+  const [size] = statements.bytes.all(session.id, session.id) as Record<string, any>[];
+
+  return {
+    source,
+    path: `${dbPath}#${session.id}`,
+    cwd,
+    bytes: Number(size?.bytes) || 0,
+    created: zcodeDate(session.time_created) ?? storeFallback.created,
+    modified: zcodeDate(session.time_updated) ?? storeFallback.modified,
+    prompts,
+    promptsComplete: promptsComplete(issues) && !issues.has("unknown_user_source"),
+    samplingIssues: [...issues],
+  };
+}
+
+function readZcodeStore(dbPath: string, source: string, context: ReadContext): SessionRecord[] {
+  let realPath: string;
+  try {
+    realPath = realpathSync(dbPath);
+  } catch {
+    return [];
+  }
+  if (context.seen.has(realPath)) return [];
+  context.seen.add(realPath);
+
+  const stat = fileStat(dbPath);
+  const storeFallback = {
+    created: stat?.created ?? new Date(0),
+    modified: stat?.modified ?? new Date(0),
+  };
+  const store = openZcodeDatabase(dbPath);
+  if (!store) {
+    context.skippedFiles.unreadable += 1;
+    return [];
+  }
+  try {
+    if (!zcodeSchemaReady(store.db)) {
+      context.skippedFiles.unsupported_format += 1;
+      return [];
+    }
+    const records: SessionRecord[] = [];
+    const sessions = store.db.prepare(ZCODE_SESSIONS_SQL).all() as Record<string, any>[];
+    const statements: ZcodeStatements = {
+      prompts: store.db.prepare(ZCODE_PROMPTS_SQL),
+      origins: store.db.prepare(ZCODE_ORIGINS_SQL),
+      malformed: store.db.prepare(ZCODE_MALFORMED_SQL),
+      bytes: store.db.prepare(ZCODE_BYTES_SQL),
+    };
+    for (const session of sessions) {
+      const result = zcodeSessionRecord(statements, dbPath, source, session, storeFallback);
+      if (typeof result === "string") context.skippedFiles[result] += 1;
+      else records.push(result);
+    }
+    return records;
+  } finally {
+    store.dispose();
+  }
+}
+
 /* --------------------------------------------------------------------- sources */
 
 interface SourceDefinition {
   id: string;
   label: string;
   roots: () => string[];
+  /** How to prove the store exists; roots may be a file, not just a directory. */
+  exists?: (path: string) => boolean;
   /** Discover these suffixes to report unsupported files without opening them. */
   unsupportedSuffixes?: readonly string[];
   read: (roots: string[], context?: ReadContext) => SessionRecord[];
@@ -559,6 +858,16 @@ export const SESSION_SOURCES: readonly SourceDefinition[] = Object.freeze([
     roots: () => [join(process.env.COPILOT_HOME?.trim() || join(homedir(), ".copilot"), "session-state")],
     read: (roots, context) => readStore(roots, "copilot", readCopilotTranscript, 1, context, [], "events.jsonl"),
   },
+  {
+    id: "zcode",
+    label: "ZCode",
+    // One SQLite file holds every ZCode session on the machine; the reader
+    // queries it in place, read-only. The synthetic record path appends
+    // `#<session id>` so a focused scan can hand back per-session keys.
+    roots: () => [join(zcodeHome(), "cli", "db", ZCODE_DB_NAME)],
+    exists: isFile,
+    read: (roots, context) => roots.flatMap((root) => readZcodeStore(root, "zcode", context ?? readContext())),
+  },
 ]);
 
 export const DEFAULT_SOURCE_IDS = Object.freeze(["rsih"]);
@@ -585,7 +894,7 @@ export function readSessions(
   for (const source of SESSION_SOURCES) {
     if (!wanted.has(source.id)) continue;
     const roots = source.roots();
-    const available = roots.some(isDirectory);
+    const available = roots.some(source.exists ?? isDirectory);
     const previousSkipped = { ...context.skippedFiles };
     const found = available ? source.read(roots, context) : [];
     records.push(...found);

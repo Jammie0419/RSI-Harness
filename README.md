@@ -138,7 +138,9 @@ actually did. It starts by asking one question in conversation: what is this Gen
 for? Then it asks which session stores to analyze (RSIH's own is included by default;
 you can add Pi's `~/.pi/agent/sessions`, Claude Code's `~/.claude/projects`,
 Codex's session and archive stores under `CODEX_HOME` (default `~/.codex`),
-and Copilot CLI's `session-state` under `COPILOT_HOME`, defaulting to `~/.copilot`). It
+Copilot CLI's `session-state` under `COPILOT_HOME`, defaulting to `~/.copilot`),
+and ZCode's single SQLite session store, defaulting to `~/.zcode`
+(`ZCODE_HOME` is an rsih-side override). It
 groups history by working directory, then aggregates tool-call histograms, frequent
 bash commands, hot files, and the corrections you keep repeating — aggregating first,
 reading raw text selectively, never dumping a whole JSONL into context. The scenario

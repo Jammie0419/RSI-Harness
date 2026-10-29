@@ -271,11 +271,12 @@ Genome，是显式逃生阀。
 
 **能做的**：造 Genome 的能力是完整的——12 个组件覆盖 Pi 的整个配置面、
 inherit-by-default 合并、settings 编译层、目录型 bundle、种子化与升级、
-`harness-rsi` 从 RSIH、Pi、Claude Code、Codex、Copilot CLI 五种 session 来源交互式生成。
+`harness-rsi` 从 RSIH、Pi、Claude Code、Codex、Copilot CLI、ZCode 六种 session 来源交互式生成。
 Codex 支持普通 JSONL rollout，从显式用户消息事件提取请求，每个文件最多读取前
 2 MiB；Copilot CLI 从每个会话的 `events.jsonl` 中提取根代理的用户消息，
-不读取 `session-store.db`。采样限制和跳过文件数会明确报告，暂不支持压缩 rollout
-或仅存于数据库的历史。
+不读取 `session-store.db`；ZCode 从其单一 SQLite 会话库（只读）中按
+`semantics.origin = "real_user"` 提取真实用户输入。采样限制和跳过文件数会明确报告，
+暂不支持压缩 rollout。
 
 **还没有的**：一条命令装远端 Genome。`genome install` 只认内置名和本地路径，
 不认 git/npm URL——要装别人的 Genome，先 clone 本仓库，再从

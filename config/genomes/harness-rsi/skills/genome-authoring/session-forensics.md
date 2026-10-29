@@ -1,6 +1,7 @@
 # Session forensics
 
-Session transcripts are append-only JSONL. One workspace can hold tens of
+Session transcripts are append-only JSONL; ZCode instead keeps every session in
+one live SQLite store. One workspace can hold tens of
 megabytes. **Aggregate with bash first, read excerpts second, never load a whole
 transcript into context.**
 
@@ -20,6 +21,7 @@ real `cwd` instead.
 | `claude` | `~/.claude/projects/<encoded cwd>/*.jsonl` | Claude Code |
 | `codex` | `<CODEX_HOME>/sessions/YYYY/MM/DD/*.jsonl` and `<CODEX_HOME>/archived_sessions/*.jsonl` | Codex rollout |
 | `copilot` | `<COPILOT_HOME>/session-state/<session id>/events.jsonl` | GitHub Copilot CLI |
+| `zcode` | `<ZCODE_HOME>/cli/db/db.sqlite` (one SQLite store for every session; default `~/.zcode`) | ZCode session store |
 
 RSIH is new, so most people have little or nothing in the first row and all of
 their real history in one of the others. **Check `sources` on the workspace
@@ -31,12 +33,17 @@ still Pi-format directories; select a custom Codex home before launching GEE.
 Copilot CLI is also opt-in, with `COPILOT_HOME` defaulting to `~/.copilot`.
 It reads per-session `events.jsonl`, not the cross-session `session-store.db`.
 Select a custom Copilot home before launching GEE; `roots` remain Pi-format.
+ZCode is opt-in as well: the store is a single live SQLite database read with
+bounded read-only queries and never written. `ZCODE_HOME` is an rsih-side
+override (ZCode itself has no home variable) defaulting to `~/.zcode`; select a
+custom ZCode home before launching GEE.
 Check `sampling_issues` and `session_files_skipped` before interpreting the
 results. A missing keyword in a bounded sample does not mean an absent habit.
-Pi/Claude reads stop at 64 KiB per file; Codex/Copilot stop at 2 MiB. All
+Pi/Claude reads stop at 64 KiB per file; Codex/Copilot stop at 2 MiB. ZCode has
+no byte window: the same prompt caps are applied inside bounded SQL. All
 sources retain at most 40 text prompts per file and 600 characters per prompt. `prompts_complete`
-only describes coverage: a byte or prompt-count bound, or unattributable Copilot
-prompts, makes it false. A file that could not be read yields no session at all
+only describes coverage: a byte or prompt-count bound, or unattributable
+Copilot/ZCode prompts, makes it false. A file that could not be read yields no session at all
 and is counted as `unreadable`.
 Text truncation, malformed records and missing canonical user events remain in
 `sampling_issues` for you to weigh; a true coverage flag does not guarantee fidelity.
@@ -49,7 +56,8 @@ metadata, unreadable files, and explicitly marked subagent/internal threads are
 reported separately in `session_files_skipped` (and each source's `files_skipped`):
 `unsupported_format`, `missing_metadata`, `unreadable`, and `filtered`. Intentional
 filtering of machine-generated tasks is not a read failure. The scanner does
-not read databases or `history.jsonl`.
+not read Codex's `history.jsonl`, and the only database it opens at all is
+ZCode's own session store, read-only.
 Path aliases are deduplicated; distinct forks and copied rollouts are not. Do not
 treat their shared history as independent evidence of repeated preferences.
 
@@ -205,6 +213,102 @@ JS
 This selective analysis can read beyond the scanner's head budget. For an
 unusually large individual record, inspect bounded byte ranges instead. Use the
 counts to choose which specific user events and tool arguments to read next.
+
+For a **selected** ZCode session, there is no file to grep or `read` with an
+offset: every session lives in one SQLite store, and `session_files` entries
+are synthetic keys — `<db path>#<session id>`. Split the key and query
+read-only:
+
+```bash
+ZCODE_KEY='<one selected session_files entry>'
+ZCODE_DB="${ZCODE_KEY%%#*}"; ZCODE_SID="${ZCODE_KEY##*#}"
+
+# User turns only — the requests and corrections, without reminders or tool output
+sqlite3 -readonly "$ZCODE_DB" "SELECT json_extract(p.data,'$.text')
+  FROM part p JOIN message m ON p.message_id = m.id
+  WHERE p.session_id='$ZCODE_SID' AND json_extract(p.data,'$.type')='text'
+    AND json_extract(m.data,'$.role')='user'
+    AND json_extract(m.data,'$.semantics.origin')='real_user'
+  ORDER BY coalesce(m.sequence, m.time_created), coalesce(p.sequence, p.time_created);"
+
+# Tool-call histogram — the single most informative query
+sqlite3 -readonly "$ZCODE_DB" "SELECT json_extract(data,'$.tool') AS tool, COUNT(*)
+  FROM part WHERE session_id='$ZCODE_SID' AND json_extract(data,'$.type')='tool'
+  GROUP BY tool ORDER BY 2 DESC;"
+
+# Which commands the user's work actually runs — first word of every shell call
+sqlite3 -readonly "$ZCODE_DB" "SELECT lower(substr(json_extract(data,'$.state.input.command'), 1,
+  instr(json_extract(data,'$.state.input.command') || ' ', ' ') - 1)) AS verb, COUNT(*)
+  FROM part WHERE session_id='$ZCODE_SID' AND json_extract(data,'$.type')='tool'
+    AND json_extract(data,'$.tool')='Bash'
+  GROUP BY verb ORDER BY 2 DESC LIMIT 20;"
+
+# Hot files
+sqlite3 -readonly "$ZCODE_DB" "SELECT json_extract(data,'$.state.input.file_path') AS file, COUNT(*)
+  FROM part WHERE session_id='$ZCODE_SID' AND json_extract(data,'$.type')='tool'
+    AND json_extract(data,'$.tool')='Read'
+  GROUP BY file ORDER BY 2 DESC LIMIT 20;"
+```
+
+No `sqlite3` command? rsih itself runs on Node, so `node:sqlite` always works
+(shipped unflagged since Node 22.13; an ExperimentalWarning may appear on
+stderr and is harmless):
+
+```bash
+node --input-type=module - "$ZCODE_DB" "$ZCODE_SID" <<'JS'
+import { DatabaseSync } from 'node:sqlite';
+const [dbPath, sid] = process.argv.slice(2);
+const db = new DatabaseSync(dbPath, { readOnly: true });
+const prompts = db.prepare(`
+  SELECT json_extract(p.data,'$.text') AS text
+  FROM part p JOIN message m ON p.message_id = m.id
+  WHERE p.session_id = ? AND json_extract(p.data,'$.type') = 'text'
+    AND json_extract(m.data,'$.role') = 'user'
+    AND json_extract(m.data,'$.semantics.origin') = 'real_user'
+  ORDER BY coalesce(m.sequence, m.time_created), coalesce(p.sequence, p.time_created)`).all(sid);
+const tools = db.prepare(`
+  SELECT json_extract(data,'$.tool') AS tool, COUNT(*) AS n
+  FROM part WHERE session_id = ? AND json_extract(data,'$.type') = 'tool'
+  GROUP BY tool ORDER BY n DESC`).all(sid);
+console.log(JSON.stringify({ prompts: prompts.map((row) => row.text), tools }, null, 2));
+db.close();
+JS
+```
+
+The store is live — ZCode may be writing while you query. Read-only access
+(`sqlite3 -readonly`, or the scanner) works beside the writer; for heavy
+analysis copy `db.sqlite` **together with `-wal` and `-shm`** to a temp
+directory first, because copying the main file alone loses whatever is still in
+the WAL. Never write to the store.
+
+The record shapes, one JSON row at a time:
+
+```jsonc
+// session row: workspace and lifecycle
+{"id":"session_...","directory":"E:\\proj","task_type":"interactive",
+ "parent_id":null,"time_created":1793205905982,"time_updated":1793206249105,"time_deleted":null}
+// message.data: only semantics.origin "real_user" is what the human typed;
+// "agent_runtime" rows are system reminders (todo nudges, background notes)
+{"role":"user","semantics":{"origin":"real_user","kind":"user_prompt",...}}
+// part.data: the prompt text itself, joined to the message by message_id
+{"type":"text","text":"what the user typed","time":{"start":...,"end":...}}
+// assistant tool call, with its arguments and output
+{"type":"tool","callID":"call_...","tool":"Bash",
+ "state":{"status":"completed","input":{"command":"..."},"output":"..."}}
+```
+
+`reasoning` parts and tool outputs are never user evidence. ZCode defines five
+origins — `real_user`, `agent_runtime`, `system`, `migration`, `import` — and
+only `real_user` is typed input; a user-role message with an origin outside
+that list is reported as `unknown_user_source` by the scanner and should not be
+trusted here either. Compact summaries arrive as `compaction` parts (message
+kind `compact_summary`), and messages wrapped with `synthetic` or hidden
+visibility flags are never evidence either; the scanner's SQL already excludes
+all of these, and a hand-written query should too. The schema is migrated per
+ZCode release and is not a public API: a failing query means an unsupported
+store, not empty history. Subagent (`task_type='subagent_child'`), parented,
+and deleted sessions are counted as `filtered`. Privacy rules are unchanged:
+these are real user prompts, not a redaction mechanism.
 
 ## Triage before anything else
 

@@ -861,6 +861,8 @@ test("scan_workspaces reports facts and never leaks transcript text", async () =
   const pi = await loadExtension();
   const tool = pi.tools.get("scan_workspaces");
   assert.ok(tool, "scan_workspaces must be registered");
+  // The store list is generated from SESSION_SOURCES; a new source must show up.
+  assert.match(tool.description, /zcode \(ZCode\)/);
 
   const root = writeSessionsRoot("/Users/x/decks", [
     "help me build a slide deck",
